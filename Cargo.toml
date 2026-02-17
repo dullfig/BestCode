@@ -1,0 +1,25 @@
+[package]
+name = "bestcode"
+version = "0.1.0"
+edition = "2021"
+description = "An AI coding agent built on rust-pipeline. No compaction, ever."
+authors = ["Daniel Ullfig <dullfig@github.com>"]
+
+[dependencies]
+rust-pipeline = { path = "../rust-pipeline" }
+
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+memmap2 = "0.9"
+crc32fast = "1"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
