@@ -42,6 +42,14 @@ use crate::llm::LlmPool;
 use super::state::{AgentState, AgentThread, PendingToolCall};
 use super::translate;
 
+/// A snapshot of an agent thread's state (for TUI display).
+#[derive(Debug, Clone)]
+pub struct AgentThreadSnapshot {
+    pub thread_id: String,
+    pub message_count: usize,
+    pub state_description: String,
+}
+
 /// The coding agent handler — stateful, per-thread conversation management.
 pub struct CodingAgentHandler {
     pool: Arc<Mutex<LlmPool>>,
@@ -82,6 +90,29 @@ impl CodingAgentHandler {
             threads: Arc::new(Mutex::new(HashMap::new())),
             system_prompt,
         }
+    }
+
+    /// Get snapshots of all active agent threads (for TUI display).
+    pub async fn thread_snapshots(&self) -> Vec<AgentThreadSnapshot> {
+        let threads = self.threads.lock().await;
+        threads
+            .iter()
+            .map(|(id, t)| {
+                let state_desc = match &t.state {
+                    AgentState::Ready => "Ready".to_string(),
+                    AgentState::AwaitingTools {
+                        pending,
+                        collected,
+                        ..
+                    } => format!("AwaitingTools({}/{})", collected.len(), pending.len()),
+                };
+                AgentThreadSnapshot {
+                    thread_id: id.clone(),
+                    message_count: t.messages.len(),
+                    state_description: state_desc,
+                }
+            })
+            .collect()
     }
 
     /// Call the LLM API with the current conversation state.

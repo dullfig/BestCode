@@ -304,6 +304,11 @@ impl ThreadTable {
         self.records.get(thread_id)
     }
 
+    /// Iterate over all thread records.
+    pub fn all_records(&self) -> impl Iterator<Item = &ThreadRecord> {
+        self.records.values()
+    }
+
     /// Number of active thread records.
     pub fn count(&self) -> usize {
         self.records.len()
@@ -451,6 +456,24 @@ mod tests {
 
         assert_eq!(table.lookup("uuid-1"), Some("system.org"));
         assert_eq!(table.get_profile("uuid-1"), Some("root"));
+    }
+
+    #[test]
+    fn thread_table_all_records() {
+        let dir = TempDir::new().unwrap();
+        let mut table = ThreadTable::open(&dir.path().join("threads.bin")).unwrap();
+        let root = table.initialize_root("org", "admin");
+        let _t1 = table.extend_chain(&root, "handler");
+
+        let records: Vec<&ThreadRecord> = table.all_records().collect();
+        assert_eq!(records.len(), 2);
+    }
+
+    #[test]
+    fn thread_table_all_records_empty() {
+        let dir = TempDir::new().unwrap();
+        let table = ThreadTable::open(&dir.path().join("threads.bin")).unwrap();
+        assert_eq!(table.all_records().count(), 0);
     }
 
     #[test]

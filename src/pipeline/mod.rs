@@ -10,12 +10,16 @@
 //! - Enforces security profiles before messages enter the pipeline
 //! - On crash recovery, rebuilds in-memory state from the kernel
 
+pub mod events;
+
 use std::path::Path;
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 
 use rust_pipeline::prelude::*;
+
+use events::PipelineEvent;
 
 use crate::agent::handler::CodingAgentHandler;
 use crate::agent::prompts;
@@ -43,6 +47,8 @@ pub struct AgentPipeline {
     organism: Organism,
     /// Security resolver (profile → dispatch table).
     security: SecurityResolver,
+    /// Broadcast channel for pipeline events (TUI, observers).
+    event_tx: broadcast::Sender<PipelineEvent>,
 }
 
 impl AgentPipeline {
@@ -67,12 +73,14 @@ impl AgentPipeline {
         let registry = ListenerRegistry::new();
         let threads = ThreadRegistry::new();
         let pipeline = Pipeline::new(registry, threads);
+        let (event_tx, _) = broadcast::channel(256);
 
         Ok(Self {
             pipeline,
             kernel: Arc::new(Mutex::new(kernel)),
             organism,
             security,
+            event_tx,
         })
     }
 
@@ -122,12 +130,16 @@ impl AgentPipeline {
     pub async fn inject_checked(
         &self,
         raw: Vec<u8>,
-        _thread_id: &str,
+        thread_id: &str,
         profile: &str,
         target: &str,
     ) -> Result<(), String> {
         // Security check: is the target reachable under this profile?
         if !self.security.can_reach(profile, target) {
+            let _ = self.event_tx.send(PipelineEvent::SecurityBlocked {
+                profile: profile.to_string(),
+                target: target.to_string(),
+            });
             return Err(format!(
                 "security: profile '{profile}' cannot reach listener '{target}'"
             ));
@@ -137,7 +149,15 @@ impl AgentPipeline {
         self.pipeline
             .inject(raw)
             .await
-            .map_err(|e| format!("inject failed: {e}"))
+            .map_err(|e| format!("inject failed: {e}"))?;
+
+        let _ = self.event_tx.send(PipelineEvent::MessageInjected {
+            thread_id: thread_id.to_string(),
+            target: target.to_string(),
+            profile: profile.to_string(),
+        });
+
+        Ok(())
     }
 
     /// Inject raw bytes directly (bypasses security — for system messages).
@@ -161,6 +181,16 @@ impl AgentPipeline {
     /// Get a reference to the organism.
     pub fn organism(&self) -> &Organism {
         &self.organism
+    }
+
+    /// Subscribe to pipeline events (for TUI, observers).
+    pub fn subscribe(&self) -> broadcast::Receiver<PipelineEvent> {
+        self.event_tx.subscribe()
+    }
+
+    /// Get the event sender (for components that need to emit events).
+    pub fn event_sender(&self) -> &broadcast::Sender<PipelineEvent> {
+        &self.event_tx
     }
 
     /// Get the security resolver.
@@ -456,12 +486,14 @@ impl AgentPipelineBuilder {
 
         let threads = ThreadRegistry::new();
         let pipeline = Pipeline::new(self.registry, threads);
+        let (event_tx, _) = broadcast::channel(256);
 
         Ok(AgentPipeline {
             pipeline,
             kernel: Arc::new(Mutex::new(kernel)),
             organism: self.organism,
             security,
+            event_tx,
         })
     }
 }
@@ -1904,5 +1936,192 @@ profiles:
 
         assert!(pipeline.organism().get_listener("coding-agent").is_some());
         assert!(pipeline.organism().get_listener("echo").is_none());
+    }
+
+    // ── Phase 6 Milestone 1: Event Bus Tests ──
+
+    #[tokio::test]
+    async fn event_bus_subscribe_receives() {
+        let dir = TempDir::new().unwrap();
+        let org = test_organism();
+
+        let echo = FnHandler(|p: ValidatedPayload, _ctx: HandlerContext| {
+            Box::pin(async move { Ok(HandlerResponse::Reply { payload_xml: p.xml }) })
+        });
+        let sink = FnHandler(|_p: ValidatedPayload, _ctx: HandlerContext| {
+            Box::pin(async move { Ok(HandlerResponse::None) })
+        });
+
+        let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+            .register("echo", echo)
+            .unwrap()
+            .register("sink", sink)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        pipeline.run();
+
+        let mut rx = pipeline.subscribe();
+
+        let envelope = build_envelope(
+            "test",
+            "echo",
+            "thread-1",
+            b"<Greeting><text>hi</text></Greeting>",
+        )
+        .unwrap();
+
+        pipeline
+            .inject_checked(envelope, "thread-1", "admin", "echo")
+            .await
+            .unwrap();
+
+        let event = rx.recv().await.unwrap();
+        match event {
+            PipelineEvent::MessageInjected { target, .. } => assert_eq!(target, "echo"),
+            _ => panic!("expected MessageInjected"),
+        }
+
+        pipeline.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn event_bus_multiple_subscribers() {
+        let dir = TempDir::new().unwrap();
+        let org = test_organism();
+
+        let echo = FnHandler(|p: ValidatedPayload, _ctx: HandlerContext| {
+            Box::pin(async move { Ok(HandlerResponse::Reply { payload_xml: p.xml }) })
+        });
+        let sink = FnHandler(|_p: ValidatedPayload, _ctx: HandlerContext| {
+            Box::pin(async move { Ok(HandlerResponse::None) })
+        });
+
+        let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+            .register("echo", echo)
+            .unwrap()
+            .register("sink", sink)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        pipeline.run();
+
+        let mut rx1 = pipeline.subscribe();
+        let mut rx2 = pipeline.subscribe();
+
+        let envelope = build_envelope(
+            "test",
+            "echo",
+            "thread-1",
+            b"<Greeting><text>hi</text></Greeting>",
+        )
+        .unwrap();
+
+        pipeline
+            .inject_checked(envelope, "thread-1", "admin", "echo")
+            .await
+            .unwrap();
+
+        let e1 = rx1.recv().await.unwrap();
+        let e2 = rx2.recv().await.unwrap();
+        assert!(matches!(e1, PipelineEvent::MessageInjected { .. }));
+        assert!(matches!(e2, PipelineEvent::MessageInjected { .. }));
+
+        pipeline.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn event_bus_security_blocked() {
+        let dir = TempDir::new().unwrap();
+        let org = test_organism();
+
+        let echo = FnHandler(|p: ValidatedPayload, _ctx: HandlerContext| {
+            Box::pin(async move { Ok(HandlerResponse::Reply { payload_xml: p.xml }) })
+        });
+        let sink = FnHandler(|_p: ValidatedPayload, _ctx: HandlerContext| {
+            Box::pin(async move { Ok(HandlerResponse::None) })
+        });
+
+        let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+            .register("echo", echo)
+            .unwrap()
+            .register("sink", sink)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        pipeline.run();
+
+        let mut rx = pipeline.subscribe();
+
+        let envelope = build_envelope("test", "sink", "thread-1", b"<SinkRequest/>").unwrap();
+
+        // Public cannot reach sink — should emit SecurityBlocked
+        let _ = pipeline
+            .inject_checked(envelope, "thread-1", "public", "sink")
+            .await;
+
+        let event = rx.recv().await.unwrap();
+        match event {
+            PipelineEvent::SecurityBlocked { profile, target } => {
+                assert_eq!(profile, "public");
+                assert_eq!(target, "sink");
+            }
+            _ => panic!("expected SecurityBlocked"),
+        }
+
+        pipeline.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn agent_thread_snapshots_empty() {
+        let pool = Arc::new(Mutex::new(crate::llm::LlmPool::with_base_url(
+            "test-key".into(),
+            "opus",
+            "http://localhost:19999".into(),
+        )));
+        let handler = crate::agent::handler::CodingAgentHandler::new(
+            pool,
+            vec![],
+            "test".into(),
+        );
+        let snapshots = handler.thread_snapshots().await;
+        assert!(snapshots.is_empty());
+    }
+
+    #[test]
+    fn event_types_clone_debug() {
+        let event = PipelineEvent::MessageInjected {
+            thread_id: "t1".into(),
+            target: "echo".into(),
+            profile: "admin".into(),
+        };
+        let cloned = event.clone();
+        let debug = format!("{:?}", cloned);
+        assert!(debug.contains("MessageInjected"));
+
+        let blocked = PipelineEvent::SecurityBlocked {
+            profile: "pub".into(),
+            target: "sink".into(),
+        };
+        let _ = blocked.clone();
+        assert!(format!("{:?}", blocked).contains("SecurityBlocked"));
+
+        let token = PipelineEvent::TokenUsage {
+            thread_id: "t1".into(),
+            input_tokens: 100,
+            output_tokens: 50,
+        };
+        let _ = token.clone();
+        assert!(format!("{:?}", token).contains("TokenUsage"));
+
+        let kernel_op = PipelineEvent::KernelOp {
+            op: events::KernelOpType::ThreadCreated,
+            thread_id: "t1".into(),
+        };
+        let _ = kernel_op.clone();
+        assert!(format!("{:?}", kernel_op).contains("KernelOp"));
     }
 }

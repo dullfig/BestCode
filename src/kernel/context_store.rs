@@ -181,6 +181,11 @@ impl ContextStore {
         self.contexts.contains_key(thread_id)
     }
 
+    /// List all thread IDs that have contexts.
+    pub fn all_thread_ids(&self) -> Vec<&str> {
+        self.contexts.keys().map(|s| s.as_str()).collect()
+    }
+
     /// Number of active contexts.
     pub fn count(&self) -> usize {
         self.contexts.len()
@@ -738,6 +743,19 @@ mod tests {
 
         let retrieved = store.get_segment("t1", "s1").unwrap();
         assert!((retrieved.relevance - 0.85).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn context_store_all_thread_ids() {
+        let dir = TempDir::new().unwrap();
+        let mut store = ContextStore::open(&dir.path().join("contexts")).unwrap();
+        store.create("thread-a").unwrap();
+        store.create("thread-b").unwrap();
+
+        let ids = store.all_thread_ids();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"thread-a"));
+        assert!(ids.contains(&"thread-b"));
     }
 
     #[test]

@@ -183,6 +183,11 @@ impl Journal {
         count
     }
 
+    /// Iterate over all journal entries.
+    pub fn all_entries(&self) -> impl Iterator<Item = &JournalEntry> {
+        self.entries.values()
+    }
+
     /// Get a journal entry by message ID.
     pub fn get(&self, message_id: &str) -> Option<&JournalEntry> {
         self.entries.get(message_id)
@@ -367,6 +372,24 @@ mod tests {
         assert!(journal.get("old-msg").is_none());
         assert!(journal.get("recent-msg").is_some());
         assert!(journal.get("forever-msg").is_some());
+    }
+
+    #[test]
+    fn journal_all_entries() {
+        let dir = TempDir::new().unwrap();
+        let mut journal = Journal::open(&dir.path().join("journal.bin")).unwrap();
+        journal.log_dispatch_simple("msg-1", "t1", "a", "b");
+        journal.log_dispatch_simple("msg-2", "t2", "a", "c");
+
+        let entries: Vec<&JournalEntry> = journal.all_entries().collect();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn journal_all_entries_empty() {
+        let dir = TempDir::new().unwrap();
+        let journal = Journal::open(&dir.path().join("journal.bin")).unwrap();
+        assert_eq!(journal.all_entries().count(), 0);
     }
 
     #[test]
