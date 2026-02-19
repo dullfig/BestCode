@@ -65,6 +65,24 @@ pub fn payload_tag_for_tool(tool_name: &str) -> &str {
     }
 }
 
+/// Translate a JSON tool call to XML with a custom tag name.
+///
+/// Used for WASM tools where the tag comes from the WasmToolRegistry
+/// rather than the hardcoded xml_tag_for_tool() map.
+pub fn tool_call_to_xml_with_tag(tag: &str, input: &serde_json::Value) -> String {
+    let mut xml = format!("<{tag}>");
+
+    if let Some(obj) = input.as_object() {
+        for (key, value) in obj {
+            let text = json_value_to_text(value);
+            xml.push_str(&format!("<{key}>{}</{key}>", xml_escape(&text)));
+        }
+    }
+
+    xml.push_str(&format!("</{tag}>"));
+    xml
+}
+
 /// Convert a JSON value to its text representation for XML.
 fn json_value_to_text(value: &serde_json::Value) -> String {
     match value {
@@ -196,5 +214,27 @@ mod tests {
         assert_eq!(xml_tag_for_tool("shell"), "ShellRequest");
         assert_eq!(xml_tag_for_tool("codebase-index"), "CodeIndexRequest");
         assert_eq!(xml_tag_for_tool("other"), "UnknownRequest");
+    }
+
+    // ── Phase 5: Dynamic XML tag for WASM tools ──
+
+    #[test]
+    fn tool_call_to_xml_with_custom_tag() {
+        let input = serde_json::json!({
+            "message": "hello world"
+        });
+        let xml = tool_call_to_xml_with_tag("EchoRequest", &input);
+        assert!(xml.starts_with("<EchoRequest>"));
+        assert!(xml.ends_with("</EchoRequest>"));
+        assert!(xml.contains("<message>hello world</message>"));
+    }
+
+    #[test]
+    fn tool_call_to_xml_with_tag_escapes() {
+        let input = serde_json::json!({
+            "content": "a < b & c > d"
+        });
+        let xml = tool_call_to_xml_with_tag("MyToolRequest", &input);
+        assert!(xml.contains("a &lt; b &amp; c &gt; d"));
     }
 }

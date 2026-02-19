@@ -148,6 +148,7 @@ mod tests {
             model: None,
             ports: vec![],
             librarian: false,
+            wasm: None,
         })
         .unwrap();
         org.register_listener(ListenerDef {
@@ -160,6 +161,7 @@ mod tests {
             model: None,
             ports: vec![],
             librarian: false,
+            wasm: None,
         })
         .unwrap();
 

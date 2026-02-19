@@ -8,7 +8,15 @@ pub mod profile;
 
 use std::collections::HashMap;
 
+use crate::wasm::capabilities::WasmCapabilities;
 use profile::{DispatchTable, SecurityProfile};
+
+/// WASM tool configuration on a listener.
+#[derive(Debug, Clone)]
+pub struct WasmToolConfig {
+    pub path: String,
+    pub capabilities: WasmCapabilities,
+}
 
 /// Port declaration on a listener (from organism config).
 #[derive(Debug, Clone)]
@@ -32,6 +40,8 @@ pub struct ListenerDef {
     pub ports: Vec<PortDef>,
     /// Whether this LLM listener auto-curates via the librarian before API calls.
     pub librarian: bool,
+    /// WASM tool configuration (present when handler == "wasm").
+    pub wasm: Option<WasmToolConfig>,
 }
 
 /// Result of a hot-reload diff.
@@ -205,6 +215,7 @@ mod tests {
             model: None,
             ports: vec![],
             librarian: false,
+            wasm: None,
         }
     }
 
@@ -310,5 +321,60 @@ mod tests {
         let org = Organism::new("test");
         let err = org.dispatch_table("nonexistent").unwrap_err();
         assert!(err.contains("not found"));
+    }
+
+    // ── Phase 5: WASM config on ListenerDef ──
+
+    #[test]
+    fn register_wasm_listener() {
+        let mut org = Organism::new("test");
+        org.register_listener(ListenerDef {
+            name: "echo".into(),
+            payload_tag: "EchoRequest".into(),
+            handler: "wasm".into(),
+            description: "Echo WASM tool".into(),
+            is_agent: false,
+            peers: vec![],
+            model: None,
+            ports: vec![],
+            librarian: false,
+            wasm: Some(WasmToolConfig {
+                path: "tools/echo.wasm".into(),
+                capabilities: WasmCapabilities::default(),
+            }),
+        })
+        .unwrap();
+
+        assert!(org.get_listener("echo").is_some());
+        assert!(org.get_listener("echo").unwrap().wasm.is_some());
+    }
+
+    #[test]
+    fn wasm_config_on_listener_def() {
+        let mut org = Organism::new("test");
+        org.register_listener(ListenerDef {
+            name: "my-tool".into(),
+            payload_tag: "MyToolRequest".into(),
+            handler: "wasm".into(),
+            description: "My WASM tool".into(),
+            is_agent: false,
+            peers: vec![],
+            model: None,
+            ports: vec![],
+            librarian: false,
+            wasm: Some(WasmToolConfig {
+                path: "tools/my_tool.wasm".into(),
+                capabilities: WasmCapabilities {
+                    stdio: true,
+                    ..Default::default()
+                },
+            }),
+        })
+        .unwrap();
+
+        let def = org.get_listener("my-tool").unwrap();
+        let wasm = def.wasm.as_ref().unwrap();
+        assert_eq!(wasm.path, "tools/my_tool.wasm");
+        assert!(wasm.capabilities.stdio);
     }
 }

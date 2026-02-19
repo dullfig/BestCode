@@ -9,7 +9,8 @@ use std::path::Path;
 use serde::Deserialize;
 
 use super::profile::{RetentionPolicy, SecurityProfile};
-use super::{ListenerDef, Organism, PortDef};
+use super::{ListenerDef, Organism, PortDef, WasmToolConfig};
+use crate::wasm::capabilities::{EnvGrant, FsGrant, WasmCapabilities};
 
 /// Top-level YAML structure.
 #[derive(Debug, Deserialize)]
@@ -42,6 +43,39 @@ struct ListenerYaml {
     ports: Vec<PortYaml>,
     #[serde(default)]
     librarian: bool,
+    #[serde(default)]
+    wasm: Option<WasmYaml>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WasmYaml {
+    path: String,
+    #[serde(default)]
+    capabilities: Option<WasmCapabilitiesYaml>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct WasmCapabilitiesYaml {
+    #[serde(default)]
+    filesystem: Vec<FsGrantYaml>,
+    #[serde(default)]
+    env: Vec<EnvGrantYaml>,
+    #[serde(default)]
+    stdio: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct FsGrantYaml {
+    host_path: String,
+    guest_path: String,
+    #[serde(default)]
+    read_only: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct EnvGrantYaml {
+    key: String,
+    value: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,6 +168,35 @@ pub fn parse_organism(yaml: &str) -> Result<Organism, String> {
             model: l.model,
             ports,
             librarian: l.librarian,
+            wasm: l.wasm.map(|w| {
+                let caps = match w.capabilities {
+                    Some(c) => WasmCapabilities {
+                        filesystem: c
+                            .filesystem
+                            .into_iter()
+                            .map(|f| FsGrant {
+                                host_path: f.host_path,
+                                guest_path: f.guest_path,
+                                read_only: f.read_only,
+                            })
+                            .collect(),
+                        env_vars: c
+                            .env
+                            .into_iter()
+                            .map(|e| EnvGrant {
+                                key: e.key,
+                                value: e.value,
+                            })
+                            .collect(),
+                        stdio: c.stdio,
+                    },
+                    None => WasmCapabilities::default(),
+                };
+                WasmToolConfig {
+                    path: w.path,
+                    capabilities: caps,
+                }
+            }),
         })?;
     }
 
@@ -376,5 +439,126 @@ profiles:
 "#;
         let err = parse_organism(yaml).unwrap_err();
         assert!(err.contains("unknown listener"));
+    }
+
+    // ── Phase 5: WASM listener parsing ──
+
+    #[test]
+    fn parse_wasm_listener() {
+        let yaml = r#"
+organism:
+  name: test-wasm
+
+listeners:
+  - name: echo
+    payload_class: tools.EchoRequest
+    handler: wasm
+    description: "Echo tool (WASM)"
+    wasm:
+      path: tools/echo.wasm
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [echo]
+    journal: retain_forever
+"#;
+        let org = parse_organism(yaml).unwrap();
+        let echo = org.get_listener("echo").unwrap();
+        assert_eq!(echo.handler, "wasm");
+        let wasm = echo.wasm.as_ref().expect("wasm config should be present");
+        assert_eq!(wasm.path, "tools/echo.wasm");
+    }
+
+    #[test]
+    fn parse_wasm_with_capabilities() {
+        let yaml = r#"
+organism:
+  name: test-wasm-caps
+
+listeners:
+  - name: my-tool
+    payload_class: tools.MyToolRequest
+    handler: wasm
+    description: "My custom tool"
+    wasm:
+      path: tools/my_tool.wasm
+      capabilities:
+        filesystem:
+          - host_path: /data
+            guest_path: /data
+            read_only: true
+        env:
+          - key: RUST_LOG
+            value: info
+        stdio: true
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [my-tool]
+    journal: retain_forever
+"#;
+        let org = parse_organism(yaml).unwrap();
+        let tool = org.get_listener("my-tool").unwrap();
+        let wasm = tool.wasm.as_ref().unwrap();
+        assert_eq!(wasm.path, "tools/my_tool.wasm");
+        assert_eq!(wasm.capabilities.filesystem.len(), 1);
+        assert_eq!(wasm.capabilities.filesystem[0].host_path, "/data");
+        assert!(wasm.capabilities.filesystem[0].read_only);
+        assert_eq!(wasm.capabilities.env_vars.len(), 1);
+        assert_eq!(wasm.capabilities.env_vars[0].key, "RUST_LOG");
+        assert!(wasm.capabilities.stdio);
+    }
+
+    #[test]
+    fn parse_listener_without_wasm() {
+        let yaml = r#"
+organism:
+  name: test-no-wasm
+
+listeners:
+  - name: file-ops
+    payload_class: tools.FileOpsRequest
+    handler: tools.file_ops.handle
+    description: "File operations"
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [file-ops]
+    journal: retain_forever
+"#;
+        let org = parse_organism(yaml).unwrap();
+        let fops = org.get_listener("file-ops").unwrap();
+        assert!(fops.wasm.is_none());
+    }
+
+    #[test]
+    fn parse_wasm_empty_capabilities() {
+        let yaml = r#"
+organism:
+  name: test-wasm-empty
+
+listeners:
+  - name: echo
+    payload_class: tools.EchoRequest
+    handler: wasm
+    description: "Echo (no caps)"
+    wasm:
+      path: tools/echo.wasm
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [echo]
+    journal: retain_forever
+"#;
+        let org = parse_organism(yaml).unwrap();
+        let echo = org.get_listener("echo").unwrap();
+        let wasm = echo.wasm.as_ref().unwrap();
+        assert!(wasm.capabilities.filesystem.is_empty());
+        assert!(wasm.capabilities.env_vars.is_empty());
+        assert!(!wasm.capabilities.stdio);
     }
 }

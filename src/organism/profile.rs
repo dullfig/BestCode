@@ -79,6 +79,7 @@ mod tests {
                 model: None,
                 ports: vec![],
                 librarian: false,
+                wasm: None,
             },
         );
 

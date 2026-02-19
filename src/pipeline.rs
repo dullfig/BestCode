@@ -29,6 +29,9 @@ use crate::ports::{Direction, PortDeclaration, PortManager, Protocol};
 use crate::security::SecurityResolver;
 use crate::treesitter::handler::CodeIndexHandler;
 use crate::treesitter::CodeIndex;
+use crate::wasm::definitions::WasmToolRegistry;
+use crate::wasm::peer::WasmToolPeer;
+use crate::wasm::runtime::WasmRuntime;
 
 /// AgentPipeline: wraps rust-pipeline's Pipeline with kernel integration.
 pub struct AgentPipeline {
@@ -190,6 +193,8 @@ pub struct AgentPipelineBuilder {
     port_manager: Option<PortManager>,
     librarian: Option<Arc<Mutex<Librarian>>>,
     code_index: Option<Arc<Mutex<CodeIndex>>>,
+    wasm_runtime: Option<Arc<WasmRuntime>>,
+    wasm_registry: Option<WasmToolRegistry>,
 }
 
 impl AgentPipelineBuilder {
@@ -203,6 +208,8 @@ impl AgentPipelineBuilder {
             port_manager: None,
             librarian: None,
             code_index: None,
+            wasm_runtime: None,
+            wasm_registry: None,
         }
     }
 
@@ -339,11 +346,61 @@ impl AgentPipelineBuilder {
         Ok(self)
     }
 
+    /// Load WASM tool components and register them as handlers.
+    ///
+    /// Scans the organism config for listeners with `handler: "wasm"`,
+    /// loads each .wasm component, registers metadata in WasmToolRegistry,
+    /// and registers WasmToolPeer as the handler.
+    ///
+    /// Paths in the wasm config are resolved relative to `base_dir`.
+    pub fn with_wasm_tools(mut self, base_dir: &Path) -> Result<Self, String> {
+        let runtime = Arc::new(
+            WasmRuntime::new().map_err(|e| format!("WASM runtime creation failed: {e}"))?,
+        );
+        let mut registry = WasmToolRegistry::new();
+
+        // Collect WASM listener info to avoid borrow conflict
+        let wasm_listeners: Vec<_> = self
+            .organism
+            .listeners()
+            .values()
+            .filter(|l| l.handler == "wasm")
+            .filter_map(|l| {
+                l.wasm.as_ref().map(|w| {
+                    (l.name.clone(), w.path.clone(), w.capabilities.clone())
+                })
+            })
+            .collect();
+
+        for (name, wasm_path, caps) in &wasm_listeners {
+            let full_path = base_dir.join(wasm_path);
+            let component = runtime
+                .load_component_from_path(&full_path)
+                .map_err(|e| format!("WASM tool '{}' load failed: {e}", name))?;
+
+            registry
+                .register(&component.metadata)
+                .map_err(|e| format!("WASM tool '{}' registry failed: {e}", name))?;
+
+            let peer = WasmToolPeer::with_capabilities(
+                runtime.clone(),
+                Arc::new(component),
+                caps.clone(),
+            );
+            self = self.register(name, peer)?;
+        }
+
+        self.wasm_runtime = Some(runtime);
+        self.wasm_registry = Some(registry);
+        Ok(self)
+    }
+
     /// Attach a CodingAgent and register the `coding-agent` handler.
     ///
     /// Requires an LLM pool to be attached first (the agent calls Opus).
     /// The organism config must have a listener named `coding-agent`.
     /// Automatically collects tool definitions from the listener's peers.
+    /// If WASM tools are loaded, their definitions are included automatically.
     pub fn with_coding_agent(mut self) -> Result<Self, String> {
         let pool = self.llm_pool.clone().ok_or_else(|| {
             "with_coding_agent() requires LLM pool — call with_llm_pool() first".to_string()
@@ -359,9 +416,13 @@ impl AgentPipelineBuilder {
             })?
             .clone();
 
-        // Build tool definitions from the listener's declared peers
+        // Build tool definitions from the listener's declared peers,
+        // with WASM registry fallback for dynamic tools
         let peer_names: Vec<&str> = def.peers.iter().map(|s| s.as_str()).collect();
-        let tool_definitions = agent_tools::build_tool_definitions(&peer_names);
+        let tool_definitions = agent_tools::build_tool_definitions_with_wasm(
+            &peer_names,
+            self.wasm_registry.as_ref(),
+        );
 
         // Build tool descriptions for the system prompt
         let tool_descs: Vec<(String, String)> = tool_definitions
@@ -1545,5 +1606,303 @@ profiles:
             .unwrap()
             .build()
             .unwrap();
+    }
+
+    // ── Phase 5 Integration Tests ──
+
+    fn echo_wasm_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+    }
+
+    fn p5_organism() -> Organism {
+        let yaml = r#"
+organism:
+  name: bestcode-p5
+
+listeners:
+  - name: echo
+    payload_class: tools.EchoRequest
+    handler: wasm
+    description: "Echo tool (WASM)"
+    wasm:
+      path: echo.wasm
+      capabilities:
+        stdio: true
+
+  - name: file-ops
+    payload_class: tools.FileOpsRequest
+    handler: tools.file_ops.handle
+    description: "File operations (stub)"
+
+  - name: llm-pool
+    payload_class: llm.LlmRequest
+    handler: llm.handle
+    description: "LLM pool"
+    ports:
+      - port: 443
+        direction: outbound
+        protocol: https
+        hosts: [api.anthropic.com]
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [echo, file-ops, llm-pool]
+    journal: retain_forever
+  restricted:
+    linux_user: agentos-restricted
+    listeners: [file-ops]
+    journal: prune_on_delivery
+"#;
+        parse_organism(yaml).unwrap()
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_with_wasm_tool() {
+        let dir = TempDir::new().unwrap();
+        let org = p5_organism();
+
+        let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+            .with_wasm_tools(&echo_wasm_dir())
+            .unwrap()
+            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert!(pipeline.organism().get_listener("echo").is_some());
+    }
+
+    #[tokio::test]
+    async fn wasm_tool_registered_as_listener() {
+        let dir = TempDir::new().unwrap();
+        let org = p5_organism();
+
+        let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+            .with_wasm_tools(&echo_wasm_dir())
+            .unwrap()
+            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let echo = pipeline.organism().get_listener("echo").unwrap();
+        assert_eq!(echo.handler, "wasm");
+        assert!(echo.wasm.is_some());
+    }
+
+    #[tokio::test]
+    async fn wasm_tool_security_scoping() {
+        let dir = TempDir::new().unwrap();
+        let org = p5_organism();
+
+        let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+            .with_wasm_tools(&echo_wasm_dir())
+            .unwrap()
+            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        // Admin can reach echo
+        assert!(pipeline.security().can_reach("admin", "echo"));
+        // Restricted CANNOT reach echo — structural impossibility
+        assert!(!pipeline.security().can_reach("restricted", "echo"));
+    }
+
+    #[tokio::test]
+    async fn wasm_tool_handles_request() {
+        let dir = TempDir::new().unwrap();
+        let org = p5_organism();
+
+        let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+            .with_wasm_tools(&echo_wasm_dir())
+            .unwrap()
+            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        pipeline.run();
+
+        let envelope = build_envelope(
+            "test",
+            "echo",
+            "thread-1",
+            b"<EchoRequest><message>hello pipeline</message></EchoRequest>",
+        )
+        .unwrap();
+
+        let result = pipeline
+            .inject_checked(envelope, "thread-1", "admin", "echo")
+            .await;
+        assert!(result.is_ok());
+
+        pipeline.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn wasm_tool_definitions_auto_generated() {
+        let dir = TempDir::new().unwrap();
+        let org = p5_organism();
+
+        let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+            .with_wasm_tools(&echo_wasm_dir())
+            .unwrap()
+            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .unwrap();
+
+        // WASM registry should have the echo tool definition
+        let reg = builder.wasm_registry.as_ref().unwrap();
+        let def = reg.definition_for("echo").unwrap();
+        assert_eq!(def.name, "echo");
+        assert_eq!(def.input_schema["type"], "object");
+    }
+
+    #[tokio::test]
+    async fn wasm_missing_file_fails() {
+        let yaml = r#"
+organism:
+  name: bad-wasm
+
+listeners:
+  - name: missing
+    payload_class: tools.MissingRequest
+    handler: wasm
+    description: "Missing WASM tool"
+    wasm:
+      path: nonexistent.wasm
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [missing]
+    journal: retain_forever
+"#;
+        let org = parse_organism(yaml).unwrap();
+        let dir = TempDir::new().unwrap();
+
+        let result = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+            .with_wasm_tools(&echo_wasm_dir());
+
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(
+            err.contains("load failed"),
+            "expected load failure, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wasm_and_native_coexist() {
+        let dir = TempDir::new().unwrap();
+        let org = p5_organism();
+
+        let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+            .with_wasm_tools(&echo_wasm_dir())
+            .unwrap()
+            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        pipeline.run();
+
+        // WASM echo tool
+        let echo_env = build_envelope(
+            "test",
+            "echo",
+            "thread-1",
+            b"<EchoRequest><message>wasm</message></EchoRequest>",
+        )
+        .unwrap();
+        assert!(pipeline
+            .inject_checked(echo_env, "thread-1", "admin", "echo")
+            .await
+            .is_ok());
+
+        // Native file-ops stub
+        let fops_env = build_envelope(
+            "test",
+            "file-ops",
+            "thread-2",
+            b"<FileOpsRequest><action>read</action><path>/tmp/x</path></FileOpsRequest>",
+        )
+        .unwrap();
+        assert!(pipeline
+            .inject_checked(fops_env, "thread-2", "admin", "file-ops")
+            .await
+            .is_ok());
+
+        pipeline.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn coding_agent_xml_tag_for_wasm() {
+        let dir = TempDir::new().unwrap();
+        let org = p5_organism();
+
+        let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+            .with_wasm_tools(&echo_wasm_dir())
+            .unwrap()
+            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .unwrap();
+
+        let reg = builder.wasm_registry.as_ref().unwrap();
+        assert_eq!(reg.request_tag_for("echo"), Some("EchoRequest"));
+    }
+
+    #[tokio::test]
+    async fn hot_reload_preserves_wasm() {
+        let dir = TempDir::new().unwrap();
+        let org = p5_organism();
+
+        let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+            .with_wasm_tools(&echo_wasm_dir())
+            .unwrap()
+            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        // Reload same config — WASM listeners should still be accessible
+        let new_org = p5_organism();
+        let _event = pipeline.reload(new_org).unwrap();
+
+        // Echo listener still present after reload
+        assert!(pipeline.organism().get_listener("echo").is_some());
+        assert!(pipeline.security().can_reach("admin", "echo"));
+    }
+
+    #[tokio::test]
+    async fn without_wasm_tools_still_works() {
+        let dir = TempDir::new().unwrap();
+        // Use p4 organism (no WASM listeners) — pipeline builds fine without with_wasm_tools()
+        let org = p4_organism();
+
+        let pool = crate::llm::LlmPool::with_base_url(
+            "test-key".into(),
+            "opus",
+            "http://localhost:19999".into(),
+        );
+
+        let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+            .with_llm_pool(pool)
+            .unwrap()
+            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .unwrap()
+            .register("shell", crate::tools::shell::ShellStub)
+            .unwrap()
+            .with_code_index()
+            .unwrap()
+            .with_coding_agent()
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert!(pipeline.organism().get_listener("coding-agent").is_some());
+        assert!(pipeline.organism().get_listener("echo").is_none());
     }
 }

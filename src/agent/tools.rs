@@ -5,6 +5,7 @@
 //! Phase 5 (WASM+WIT) will auto-generate from WIT definitions.
 
 use crate::llm::types::ToolDefinition;
+use crate::wasm::definitions::WasmToolRegistry;
 
 /// Build a ToolDefinition for the file-ops tool.
 pub fn file_ops_definition() -> ToolDefinition {
@@ -110,6 +111,26 @@ pub fn definition_for_peer(name: &str) -> Option<ToolDefinition> {
     }
 }
 
+/// Build tool definitions with WASM registry fallback.
+///
+/// Built-in tools checked first, then WASM registry fallback for unknown peers.
+pub fn build_tool_definitions_with_wasm(
+    peer_names: &[&str],
+    wasm_registry: Option<&WasmToolRegistry>,
+) -> Vec<ToolDefinition> {
+    let mut defs = Vec::new();
+    for name in peer_names {
+        if let Some(def) = definition_for_peer(name) {
+            defs.push(def);
+        } else if let Some(reg) = wasm_registry {
+            if let Some(def) = reg.definition_for(name) {
+                defs.push(def.clone());
+            }
+        }
+    }
+    defs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +205,60 @@ mod tests {
             // Re-parse to ensure valid JSON
             let _: serde_json::Value = serde_json::from_str(&json).unwrap();
         }
+    }
+
+    // ── Phase 5: WASM tool definition integration ──
+
+    #[test]
+    fn build_with_wasm_fallback() {
+        let mut reg = WasmToolRegistry::new();
+        reg.register(&crate::wasm::runtime::ToolMetadata {
+            name: "echo".into(),
+            description: "Echo tool".into(),
+            semantic_description: "Echoes".into(),
+            request_tag: "EchoRequest".into(),
+            request_schema: "".into(),
+            response_schema: "".into(),
+            input_json_schema: r#"{"type":"object","properties":{"message":{"type":"string"}}}"#
+                .into(),
+        })
+        .unwrap();
+
+        // file-ops from built-in, echo from WASM
+        let defs = build_tool_definitions_with_wasm(&["file-ops", "echo"], Some(&reg));
+        assert_eq!(defs.len(), 2);
+        assert_eq!(defs[0].name, "file-ops");
+        assert_eq!(defs[1].name, "echo");
+    }
+
+    #[test]
+    fn build_wasm_only() {
+        let mut reg = WasmToolRegistry::new();
+        reg.register(&crate::wasm::runtime::ToolMetadata {
+            name: "echo".into(),
+            description: "Echo tool".into(),
+            semantic_description: "Echoes".into(),
+            request_tag: "EchoRequest".into(),
+            request_schema: "".into(),
+            response_schema: "".into(),
+            input_json_schema: r#"{"type":"object","properties":{"message":{"type":"string"}}}"#
+                .into(),
+        })
+        .unwrap();
+        reg.register(&crate::wasm::runtime::ToolMetadata {
+            name: "reverse".into(),
+            description: "Reverse tool".into(),
+            semantic_description: "Reverses".into(),
+            request_tag: "ReverseRequest".into(),
+            request_schema: "".into(),
+            response_schema: "".into(),
+            input_json_schema: r#"{"type":"object","properties":{"text":{"type":"string"}}}"#
+                .into(),
+        })
+        .unwrap();
+
+        // All from WASM registry
+        let defs = build_tool_definitions_with_wasm(&["echo", "reverse"], Some(&reg));
+        assert_eq!(defs.len(), 2);
     }
 }

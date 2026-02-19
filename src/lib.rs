@@ -13,3 +13,4 @@ pub mod ports;
 pub mod security;
 pub mod tools;
 pub mod treesitter;
+pub mod wasm;
