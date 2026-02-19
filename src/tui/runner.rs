@@ -131,6 +131,7 @@ mod tests {
             status: crate::kernel::context_store::SegmentStatus::Active,
             relevance: 0.8,
             created_at: 0,
+            fold_ref: None,
         };
         kernel.contexts_mut().add_segment(&root, seg).unwrap();
 

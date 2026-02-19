@@ -101,6 +101,87 @@ impl Kernel {
         Ok(result)
     }
 
+    /// Atomic fold: thread pruned + context folded (summary in parent) + journal updated.
+    /// Alternative to `prune_thread()` — compresses instead of destroying.
+    /// The `summary` is inserted as a fold segment in the parent's context.
+    pub fn fold_thread(
+        &mut self,
+        thread_id: &str,
+        summary: &[u8],
+    ) -> KernelResult<Option<thread_table::PruneResult>> {
+        // Look up what we'll prune before writing WAL
+        let prune_result = self.threads.peek_prune(thread_id);
+        if prune_result.is_none() {
+            return Ok(None);
+        }
+
+        // Stash child segment contents in fold_store before releasing
+        let fold_thread_ref = format!("fold-thread-{}", thread_id);
+        let mut has_content = false;
+        if let Some(ctx) = self.contexts.get(thread_id) {
+            let mut combined_content = Vec::new();
+            for seg in ctx.segments.values() {
+                combined_content.extend_from_slice(&seg.content);
+                combined_content.push(b'\n');
+            }
+            if !combined_content.is_empty() {
+                self.contexts.fold_store.insert(fold_thread_ref.clone(), combined_content);
+                has_content = true;
+            }
+        }
+
+        // Build WAL batch: prune + release child context + journal delivered
+        let batch = vec![
+            wal::WalEntry::new(
+                wal::EntryType::ThreadPrune,
+                thread_id.as_bytes().to_vec(),
+            ),
+            wal::WalEntry::new(
+                wal::EntryType::ContextRelease,
+                thread_id.as_bytes().to_vec(),
+            ),
+            wal::WalEntry::new(
+                wal::EntryType::JournalDelivered,
+                thread_id.as_bytes().to_vec(),
+            ),
+        ];
+
+        // WAL first, then apply to state
+        self.wal.append_batch(&batch)?;
+
+        let result = self.threads.prune_for_response(thread_id);
+        self.contexts.release(thread_id)?;
+        self.journal.mark_delivered_by_thread(thread_id);
+
+        // Add summary segment to parent's context (if parent exists)
+        // PruneResult.thread_id is the parent's UUID after pruning
+        if let Some(ref pr) = result {
+            let parent_id = &pr.thread_id;
+            if self.contexts.exists(parent_id) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let fold_seg = context_store::ContextSegment {
+                    id: format!("fold:{}", thread_id),
+                    tag: "fold-summary".into(),
+                    content: summary.to_vec(),
+                    status: context_store::SegmentStatus::Folded,
+                    relevance: 0.5,
+                    created_at: now,
+                    fold_ref: if has_content {
+                        Some(fold_thread_ref)
+                    } else {
+                        None
+                    },
+                };
+                let _ = self.contexts.add_segment(parent_id, fold_seg);
+            }
+        }
+
+        Ok(result)
+    }
+
     /// Atomic dispatch: extend thread + allocate context + log journal entry.
     /// Returns the new thread UUID.
     pub fn dispatch_message(
@@ -431,5 +512,166 @@ mod tests {
         // Journal: message marked delivered (by thread)
         // Note: mark_delivered_by_thread matches on thread_id, which is the root UUID
         // The message was dispatched on root's thread
+    }
+
+    // ── Folding Context tests (Milestone 2) ──
+
+    #[test]
+    fn fold_thread_basic() {
+        let dir = TempDir::new().unwrap();
+        let mut kernel = Kernel::open(&dir.path().join("data")).unwrap();
+        let root = kernel.initialize_root("org", "admin").unwrap();
+
+        // Dispatch to create a child thread
+        let child = kernel
+            .dispatch_message("console", "handler", &root, "msg-fold")
+            .unwrap();
+
+        // Add some content to the child's context
+        kernel.contexts_mut().add_segment(
+            &root,
+            context_store::ContextSegment {
+                id: "work".into(),
+                tag: "code".into(),
+                content: b"fn handler() { /* work */ }".to_vec(),
+                status: context_store::SegmentStatus::Active,
+                relevance: 0.8,
+                created_at: 0,
+                fold_ref: None,
+            },
+        ).unwrap();
+
+        // Fold the child thread
+        let result = kernel.fold_thread(&child, b"[handler completed work]").unwrap();
+        assert!(result.is_some());
+
+        // Child context should be released
+        assert!(!kernel.contexts().exists(&child));
+    }
+
+    #[test]
+    fn fold_thread_preserves_parent() {
+        let dir = TempDir::new().unwrap();
+        let mut kernel = Kernel::open(&dir.path().join("data")).unwrap();
+        let root = kernel.initialize_root("org", "admin").unwrap();
+
+        // Add content to root context
+        kernel.contexts_mut().create(&root).unwrap();
+        kernel.contexts_mut().add_segment(
+            &root,
+            context_store::ContextSegment {
+                id: "parent-data".into(),
+                tag: "msg".into(),
+                content: b"parent context data".to_vec(),
+                status: context_store::SegmentStatus::Active,
+                relevance: 0.9,
+                created_at: 0,
+                fold_ref: None,
+            },
+        ).unwrap();
+
+        let child = kernel
+            .dispatch_message("console", "handler", &root, "msg-fp")
+            .unwrap();
+
+        kernel.fold_thread(&child, b"[summary]").unwrap();
+
+        // Parent's original segment still there
+        let parent_seg = kernel.contexts().get_segment(&root, "parent-data").unwrap();
+        assert_eq!(parent_seg.content, b"parent context data");
+    }
+
+    #[test]
+    fn fold_thread_wal_batch() {
+        let dir = TempDir::new().unwrap();
+        let mut kernel = Kernel::open(&dir.path().join("data")).unwrap();
+        let root = kernel.initialize_root("org", "admin").unwrap();
+        let child = kernel
+            .dispatch_message("console", "handler", &root, "msg-wb")
+            .unwrap();
+
+        kernel.fold_thread(&child, b"[folded]").unwrap();
+
+        // WAL should have entries (verify by checking WAL size > 0)
+        assert!(kernel.wal().size().unwrap() > 0);
+    }
+
+    #[test]
+    fn fold_thread_crash_recovery() {
+        let dir = TempDir::new().unwrap();
+        let data_dir = dir.path().join("data");
+
+        let child_uuid;
+        {
+            let mut kernel = Kernel::open(&data_dir).unwrap();
+            let root = kernel.initialize_root("org", "admin").unwrap();
+            child_uuid = kernel
+                .dispatch_message("console", "handler", &root, "msg-cr")
+                .unwrap();
+            kernel.fold_thread(&child_uuid, b"[recovered fold]").unwrap();
+        }
+
+        // Reopen — WAL replay should recover state
+        let kernel = Kernel::open(&data_dir).unwrap();
+        assert!(!kernel.contexts().exists(&child_uuid));
+    }
+
+    #[test]
+    fn fold_thread_nonexistent_fails() {
+        let dir = TempDir::new().unwrap();
+        let mut kernel = Kernel::open(&dir.path().join("data")).unwrap();
+        kernel.initialize_root("org", "admin").unwrap();
+
+        let result = kernel.fold_thread("nonexistent-uuid", b"[summary]").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn prune_thread_still_works() {
+        // Verify the existing release-based prune is unaffected
+        let dir = TempDir::new().unwrap();
+        let mut kernel = Kernel::open(&dir.path().join("data")).unwrap();
+        let root = kernel.initialize_root("org", "admin").unwrap();
+        let child = kernel
+            .dispatch_message("console", "handler", &root, "msg-pt")
+            .unwrap();
+
+        let result = kernel.prune_thread(&child).unwrap();
+        assert!(result.is_some());
+        assert!(!kernel.contexts().exists(&child));
+    }
+
+    #[test]
+    fn fold_thread_child_context_released() {
+        let dir = TempDir::new().unwrap();
+        let mut kernel = Kernel::open(&dir.path().join("data")).unwrap();
+        let root = kernel.initialize_root("org", "admin").unwrap();
+        let child = kernel
+            .dispatch_message("console", "handler", &root, "msg-ccr")
+            .unwrap();
+
+        // Verify child context exists before fold
+        assert!(kernel.contexts().exists(&root));
+
+        kernel.fold_thread(&child, b"[done]").unwrap();
+
+        // Child context released
+        assert!(!kernel.contexts().exists(&child));
+    }
+
+    #[test]
+    fn kernel_op_context_folded_variant() {
+        // Verify the KernelOpType::ContextFolded variant constructs
+        use crate::pipeline::events::{KernelOpType, PipelineEvent};
+        let event = PipelineEvent::KernelOp {
+            op: KernelOpType::ContextFolded,
+            thread_id: "t1".into(),
+        };
+        if let PipelineEvent::KernelOp { op, thread_id } = event {
+            assert!(matches!(op, KernelOpType::ContextFolded));
+            assert_eq!(thread_id, "t1");
+        } else {
+            panic!("wrong variant");
+        }
     }
 }

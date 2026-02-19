@@ -36,6 +36,10 @@ pub struct CurationResult {
     pub paged_in: Vec<String>,
     /// Segment IDs that were paged out.
     pub paged_out: Vec<String>,
+    /// Segment IDs that were folded.
+    pub folded: Vec<String>,
+    /// Segment IDs that were unfolded.
+    pub unfolded: Vec<String>,
     /// Estimated tokens in the working set.
     pub working_set_tokens: usize,
 }
@@ -75,6 +79,8 @@ impl Librarian {
                 system_context: None,
                 paged_in: vec![],
                 paged_out: vec![],
+                folded: vec![],
+                unfolded: vec![],
                 working_set_tokens: 0,
             });
         }
@@ -103,9 +109,11 @@ impl Librarian {
         let decision =
             prompt::parse_curation_response(&response_text).map_err(LibrarianError::Parse)?;
 
-        // Apply paging decisions to the context store
+        // Apply paging and fold/unfold decisions to the context store
         let mut paged_in = Vec::new();
         let mut paged_out = Vec::new();
+        let mut folded = Vec::new();
+        let mut unfolded = Vec::new();
         {
             let mut kernel = self.kernel.lock().await;
             for seg_id in &decision.page_in {
@@ -116,6 +124,17 @@ impl Librarian {
             for seg_id in &decision.page_out {
                 if kernel.contexts_mut().page_out(thread_id, seg_id).is_ok() {
                     paged_out.push(seg_id.clone());
+                }
+            }
+            for seg_id in &decision.fold {
+                let summary = format!("[folded: {}]", seg_id).into_bytes();
+                if kernel.contexts_mut().fold(thread_id, seg_id, summary).is_ok() {
+                    folded.push(seg_id.clone());
+                }
+            }
+            for seg_id in &decision.unfold {
+                if kernel.contexts_mut().unfold(thread_id, seg_id).is_ok() {
+                    unfolded.push(seg_id.clone());
                 }
             }
         }
@@ -148,6 +167,8 @@ impl Librarian {
             system_context,
             paged_in,
             paged_out,
+            folded,
+            unfolded,
             working_set_tokens,
         })
     }
@@ -258,10 +279,26 @@ mod tests {
             system_context: Some("test context".into()),
             paged_in: vec!["s1".into()],
             paged_out: vec!["s2".into()],
+            folded: vec![],
+            unfolded: vec![],
             working_set_tokens: 100,
         };
         assert_eq!(result.paged_in.len(), 1);
         assert_eq!(result.paged_out.len(), 1);
         assert_eq!(result.working_set_tokens, 100);
+    }
+
+    #[test]
+    fn curation_result_has_fold_fields() {
+        let result = CurationResult {
+            system_context: None,
+            paged_in: vec![],
+            paged_out: vec![],
+            folded: vec!["s1".into(), "s2".into()],
+            unfolded: vec!["s3".into()],
+            working_set_tokens: 0,
+        };
+        assert_eq!(result.folded.len(), 2);
+        assert_eq!(result.unfolded.len(), 1);
     }
 }

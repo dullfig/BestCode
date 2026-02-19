@@ -101,6 +101,7 @@ pub struct ContextView {
     pub segments: Vec<SegmentView>,
     pub active_count: usize,
     pub shelved_count: usize,
+    pub folded_count: usize,
     pub total_bytes: usize,
     pub active_bytes: usize,
 }
@@ -112,6 +113,7 @@ impl From<&ContextInventory> for ContextView {
             segments: inv.segments.iter().map(SegmentView::from).collect(),
             active_count: inv.active_count,
             shelved_count: inv.shelved_count,
+            folded_count: inv.folded_count,
             total_bytes: inv.total_bytes,
             active_bytes: inv.active_bytes,
         }
@@ -421,6 +423,7 @@ mod tests {
             ],
             active_count: 1,
             shelved_count: 1,
+            folded_count: 0,
             total_bytes: 150,
             active_bytes: 100,
         };

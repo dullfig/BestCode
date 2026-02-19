@@ -38,6 +38,8 @@ pub enum EntryType {
     ContextSegmentPageIn = 15,
     ContextSegmentPageOut = 16,
     ContextSegmentRelevance = 17,
+    ContextFold = 18,
+    ContextUnfold = 19,
 
     // Journal ops
     JournalDispatched = 20,
@@ -63,6 +65,8 @@ impl EntryType {
             15 => Some(Self::ContextSegmentPageIn),
             16 => Some(Self::ContextSegmentPageOut),
             17 => Some(Self::ContextSegmentRelevance),
+            18 => Some(Self::ContextFold),
+            19 => Some(Self::ContextUnfold),
             20 => Some(Self::JournalDispatched),
             21 => Some(Self::JournalDelivered),
             22 => Some(Self::JournalFailed),

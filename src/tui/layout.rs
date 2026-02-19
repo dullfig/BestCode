@@ -138,6 +138,7 @@ fn draw_context(f: &mut Frame, app: &TuiApp, area: Rect) {
                 let status_char = match s.status {
                     crate::kernel::context_store::SegmentStatus::Active => "A",
                     crate::kernel::context_store::SegmentStatus::Shelved => "S",
+                    crate::kernel::context_store::SegmentStatus::Folded => "F",
                 };
                 Line::from(vec![
                     Span::styled(

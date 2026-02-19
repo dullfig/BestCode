@@ -37,4 +37,5 @@ pub enum KernelOpType {
     ThreadPruned,
     ContextAllocated,
     ContextReleased,
+    ContextFolded,
 }

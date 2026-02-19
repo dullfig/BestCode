@@ -15,6 +15,7 @@ use super::wal::{EntryType, WalEntry};
 pub enum SegmentStatus {
     Active,
     Shelved,
+    Folded,
 }
 
 /// A single context segment — the "page" in our VMM metaphor.
@@ -24,14 +25,16 @@ pub struct ContextSegment {
     pub id: String,
     /// Type tag: "message", "code", "search-result", "codebase-map"
     pub tag: String,
-    /// The actual data.
+    /// The actual data. For Folded segments: this is the SUMMARY.
     pub content: Vec<u8>,
-    /// Active (in working set) or Shelved (in backing store).
+    /// Active (in working set), Shelved (backing store), or Folded (compressed).
     pub status: SegmentStatus,
     /// Relevance score 0.0–1.0, scored by librarian, decays over time.
     pub relevance: f32,
     /// Creation timestamp (epoch millis).
     pub created_at: u64,
+    /// Key into fold_store when status == Folded.
+    pub fold_ref: Option<String>,
 }
 
 /// Metadata about a segment (for librarian inventory — no content).
@@ -52,6 +55,7 @@ pub struct ContextInventory {
     pub segments: Vec<SegmentMeta>,
     pub active_count: usize,
     pub shelved_count: usize,
+    pub folded_count: usize,
     pub total_bytes: usize,
     pub active_bytes: usize,
 }
@@ -65,6 +69,8 @@ pub struct ThreadContext {
 /// The context store — manages all thread contexts.
 pub struct ContextStore {
     contexts: HashMap<String, ThreadContext>,
+    /// Fold store: fold_ref → stashed full content for folded segments.
+    pub(crate) fold_store: HashMap<String, Vec<u8>>,
     #[allow(dead_code)]
     base_dir: PathBuf,
 }
@@ -75,6 +81,7 @@ impl ContextStore {
         std::fs::create_dir_all(base_dir)?;
         Ok(Self {
             contexts: HashMap::new(),
+            fold_store: HashMap::new(),
             base_dir: base_dir.to_path_buf(),
         })
     }
@@ -100,6 +107,7 @@ impl ContextStore {
                             status: SegmentStatus::Active,
                             relevance: 0.5,
                             created_at: now_millis(),
+                            fold_ref: None,
                         },
                     );
                 }
@@ -144,6 +152,37 @@ impl ContextStore {
                     if let Some(ctx) = self.contexts.get_mut(&thread_id) {
                         if let Some(seg) = ctx.segments.get_mut(&seg_id) {
                             seg.relevance = rel;
+                        }
+                    }
+                }
+            }
+            EntryType::ContextFold => {
+                // Payload: thread_id\0segment_id\0fold_ref\0summary_bytes
+                if let Some((thread_id, seg_id, fold_ref, summary)) =
+                    parse_fold_payload(&entry.payload)
+                {
+                    if let Some(ctx) = self.contexts.get_mut(&thread_id) {
+                        if let Some(seg) = ctx.segments.get_mut(&seg_id) {
+                            self.fold_store.insert(fold_ref.clone(), seg.content.clone());
+                            seg.content = summary;
+                            seg.status = SegmentStatus::Folded;
+                            seg.fold_ref = Some(fold_ref);
+                        }
+                    }
+                }
+            }
+            EntryType::ContextUnfold => {
+                // Payload: thread_id\0segment_id
+                if let Some((thread_id, seg_id)) = parse_two_part_payload(&entry.payload) {
+                    if let Some(ctx) = self.contexts.get_mut(&thread_id) {
+                        if let Some(seg) = ctx.segments.get_mut(&seg_id) {
+                            if let Some(ref fr) = seg.fold_ref {
+                                if let Some(original) = self.fold_store.remove(fr) {
+                                    seg.content = original;
+                                    seg.status = SegmentStatus::Active;
+                                    seg.fold_ref = None;
+                                }
+                            }
                         }
                     }
                 }
@@ -214,6 +253,7 @@ impl ContextStore {
                 status: SegmentStatus::Active,
                 relevance: 0.5,
                 created_at: now_millis(),
+                fold_ref: None,
             },
         );
         Ok(())
@@ -253,6 +293,13 @@ impl ContextStore {
         payload.extend_from_slice(&segment.relevance.to_le_bytes());
         payload.extend_from_slice(&segment.created_at.to_le_bytes());
         payload.push(0);
+        // For Folded segments, serialize fold_ref before content
+        if segment.status == SegmentStatus::Folded {
+            if let Some(ref fr) = segment.fold_ref {
+                payload.extend_from_slice(fr.as_bytes());
+            }
+            payload.push(0);
+        }
         payload.extend_from_slice(&segment.content);
         WalEntry::new(EntryType::ContextSegmentAdd, payload)
     }
@@ -331,6 +378,123 @@ impl ContextStore {
         WalEntry::new(EntryType::ContextSegmentRelevance, payload)
     }
 
+    // ── Fold ops (Folding Contexts) ──
+
+    /// Fold a segment: stash content in fold_store, replace with summary.
+    /// Active/Shelved → Folded.
+    pub fn fold(
+        &mut self,
+        thread_id: &str,
+        segment_id: &str,
+        summary: Vec<u8>,
+    ) -> KernelResult<()> {
+        let ctx = self.contexts.get_mut(thread_id)
+            .ok_or_else(|| KernelError::ContextNotFound(thread_id.to_string()))?;
+        let seg = ctx.segments.get_mut(segment_id)
+            .ok_or_else(|| KernelError::ContextNotFound(format!("{thread_id}/{segment_id}")))?;
+        if seg.status == SegmentStatus::Folded {
+            return Err(KernelError::InvalidData(format!(
+                "segment {segment_id} is already folded"
+            )));
+        }
+        let fold_ref = format!("fold-{}-{}", thread_id, segment_id);
+        self.fold_store.insert(fold_ref.clone(), seg.content.clone());
+        seg.content = summary;
+        seg.status = SegmentStatus::Folded;
+        seg.fold_ref = Some(fold_ref);
+        Ok(())
+    }
+
+    /// Build a WAL entry for fold.
+    /// Payload: thread_id\0segment_id\0fold_ref\0summary_bytes
+    pub fn wal_entry_fold(thread_id: &str, segment_id: &str, fold_ref: &str, summary: &[u8]) -> WalEntry {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(thread_id.as_bytes());
+        payload.push(0);
+        payload.extend_from_slice(segment_id.as_bytes());
+        payload.push(0);
+        payload.extend_from_slice(fold_ref.as_bytes());
+        payload.push(0);
+        payload.extend_from_slice(summary);
+        WalEntry::new(EntryType::ContextFold, payload)
+    }
+
+    /// Unfold a segment: restore content from fold_store.
+    /// Folded → Active.
+    pub fn unfold(
+        &mut self,
+        thread_id: &str,
+        segment_id: &str,
+    ) -> KernelResult<()> {
+        let ctx = self.contexts.get(thread_id)
+            .ok_or_else(|| KernelError::ContextNotFound(thread_id.to_string()))?;
+        let seg = ctx.segments.get(segment_id)
+            .ok_or_else(|| KernelError::ContextNotFound(format!("{thread_id}/{segment_id}")))?;
+        if seg.status != SegmentStatus::Folded {
+            return Err(KernelError::InvalidData(format!(
+                "segment {segment_id} is not folded (status: {:?})",
+                seg.status
+            )));
+        }
+        let fold_ref = seg.fold_ref.as_ref().ok_or_else(|| {
+            KernelError::InvalidData(format!("folded segment {segment_id} has no fold_ref"))
+        })?.clone();
+
+        let original = self.fold_store.remove(&fold_ref).ok_or_else(|| {
+            KernelError::InvalidData(format!("fold_ref {fold_ref} not found in fold_store"))
+        })?;
+
+        let ctx = self.contexts.get_mut(thread_id).unwrap();
+        let seg = ctx.segments.get_mut(segment_id).unwrap();
+        seg.content = original;
+        seg.status = SegmentStatus::Active;
+        seg.fold_ref = None;
+        Ok(())
+    }
+
+    /// Build a WAL entry for unfold.
+    /// Payload: thread_id\0segment_id
+    pub fn wal_entry_unfold(thread_id: &str, segment_id: &str) -> WalEntry {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(thread_id.as_bytes());
+        payload.push(0);
+        payload.extend_from_slice(segment_id.as_bytes());
+        WalEntry::new(EntryType::ContextUnfold, payload)
+    }
+
+    /// Evict a fold: remove from fold_store, keep summary as Shelved.
+    /// Folded → Shelved (summary only, full content lost).
+    pub fn evict_fold(
+        &mut self,
+        thread_id: &str,
+        segment_id: &str,
+    ) -> KernelResult<()> {
+        let ctx = self.contexts.get(thread_id)
+            .ok_or_else(|| KernelError::ContextNotFound(thread_id.to_string()))?;
+        let seg = ctx.segments.get(segment_id)
+            .ok_or_else(|| KernelError::ContextNotFound(format!("{thread_id}/{segment_id}")))?;
+        if seg.status != SegmentStatus::Folded {
+            return Err(KernelError::InvalidData(format!(
+                "segment {segment_id} is not folded"
+            )));
+        }
+        let fold_ref_key = seg.fold_ref.clone();
+
+        if let Some(ref fr) = fold_ref_key {
+            self.fold_store.remove(fr);
+        }
+        let ctx = self.contexts.get_mut(thread_id).unwrap();
+        let seg = ctx.segments.get_mut(segment_id).unwrap();
+        seg.status = SegmentStatus::Shelved;
+        seg.fold_ref = None;
+        Ok(())
+    }
+
+    /// Number of entries in the fold store.
+    pub fn fold_store_len(&self) -> usize {
+        self.fold_store.len()
+    }
+
     /// Get all Active segments sorted by relevance (highest first).
     pub fn get_working_set(&self, thread_id: &str) -> KernelResult<Vec<&ContextSegment>> {
         let ctx = self
@@ -360,6 +524,7 @@ impl ContextStore {
         let mut segments = Vec::new();
         let mut active_count = 0;
         let mut shelved_count = 0;
+        let mut folded_count = 0;
         let mut total_bytes = 0;
         let mut active_bytes = 0;
 
@@ -373,6 +538,9 @@ impl ContextStore {
                 }
                 SegmentStatus::Shelved => {
                     shelved_count += 1;
+                }
+                SegmentStatus::Folded => {
+                    folded_count += 1;
                 }
             }
             segments.push(SegmentMeta {
@@ -390,6 +558,7 @@ impl ContextStore {
             segments,
             active_count,
             shelved_count,
+            folded_count,
             total_bytes,
             active_bytes,
         })
@@ -455,10 +624,10 @@ fn parse_segment_add_payload(payload: &[u8]) -> Option<(String, ContextSegment)>
         return None; // need 1 (status) + 4 (f32) + 8 (u64)
     }
 
-    let status = if payload[start] == 0 {
-        SegmentStatus::Active
-    } else {
-        SegmentStatus::Shelved
+    let status = match payload[start] {
+        0 => SegmentStatus::Active,
+        2 => SegmentStatus::Folded,
+        _ => SegmentStatus::Shelved,
     };
     start += 1;
 
@@ -473,6 +642,19 @@ fn parse_segment_add_payload(payload: &[u8]) -> Option<(String, ContextSegment)>
         start += 1;
     }
 
+    // Parse fold_ref: if status is Folded, the next null-delimited string is the fold_ref
+    let fold_ref = if status == SegmentStatus::Folded && start < payload.len() {
+        if let Some(null_pos) = payload[start..].iter().position(|&b| b == 0) {
+            let fr = String::from_utf8_lossy(&payload[start..start + null_pos]).to_string();
+            start = start + null_pos + 1;
+            Some(fr)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let content = payload[start..].to_vec();
 
     Some((
@@ -484,8 +666,23 @@ fn parse_segment_add_payload(payload: &[u8]) -> Option<(String, ContextSegment)>
             status,
             relevance,
             created_at,
+            fold_ref,
         },
     ))
+}
+
+fn parse_fold_payload(payload: &[u8]) -> Option<(String, String, String, Vec<u8>)> {
+    // Format: thread_id\0segment_id\0fold_ref\0summary_bytes
+    let mut parts = Vec::new();
+    let mut start = 0;
+    // Parse three null-delimited strings: thread_id, segment_id, fold_ref
+    for _ in 0..3 {
+        let pos = payload[start..].iter().position(|&b| b == 0)? + start;
+        parts.push(String::from_utf8_lossy(&payload[start..pos]).to_string());
+        start = pos + 1;
+    }
+    let summary = payload[start..].to_vec();
+    Some((parts[0].clone(), parts[1].clone(), parts[2].clone(), summary))
 }
 
 fn parse_relevance_payload(payload: &[u8]) -> Option<(String, String, f32)> {
@@ -525,6 +722,7 @@ mod tests {
             status: SegmentStatus::Active,
             relevance: 0.5,
             created_at: now_millis(),
+            fold_ref: None,
         }
     }
 
@@ -790,5 +988,215 @@ mod tests {
         // Release via WAL replay
         store.apply_wal_entry(&WalEntry::new(EntryType::ContextRelease, b"t1".to_vec()));
         assert!(!store.exists("t1"));
+    }
+
+    // ── Folding Context tests (Milestone 1) ──
+
+    #[test]
+    fn fold_active_segment() {
+        let dir = TempDir::new().unwrap();
+        let mut store = ContextStore::open(&dir.path().join("contexts")).unwrap();
+        store.create("t1").unwrap();
+        store.add_segment("t1", make_segment("s1", "code", b"fn main() {}")).unwrap();
+
+        store.fold("t1", "s1", b"[summary: main function]".to_vec()).unwrap();
+
+        let seg = store.get_segment("t1", "s1").unwrap();
+        assert_eq!(seg.status, SegmentStatus::Folded);
+        assert_eq!(seg.content, b"[summary: main function]");
+        assert!(seg.fold_ref.is_some());
+    }
+
+    #[test]
+    fn fold_shelved_segment() {
+        let dir = TempDir::new().unwrap();
+        let mut store = ContextStore::open(&dir.path().join("contexts")).unwrap();
+        store.create("t1").unwrap();
+        let mut seg = make_segment("s1", "code", b"shelved data");
+        seg.status = SegmentStatus::Shelved;
+        store.add_segment("t1", seg).unwrap();
+
+        store.fold("t1", "s1", b"[folded]".to_vec()).unwrap();
+
+        let seg = store.get_segment("t1", "s1").unwrap();
+        assert_eq!(seg.status, SegmentStatus::Folded);
+        assert_eq!(seg.content, b"[folded]");
+    }
+
+    #[test]
+    fn unfold_restores_content() {
+        let dir = TempDir::new().unwrap();
+        let mut store = ContextStore::open(&dir.path().join("contexts")).unwrap();
+        store.create("t1").unwrap();
+        store.add_segment("t1", make_segment("s1", "code", b"original content")).unwrap();
+
+        store.fold("t1", "s1", b"[summary]".to_vec()).unwrap();
+        assert_eq!(store.get_segment("t1", "s1").unwrap().content, b"[summary]");
+
+        store.unfold("t1", "s1").unwrap();
+
+        let seg = store.get_segment("t1", "s1").unwrap();
+        assert_eq!(seg.status, SegmentStatus::Active);
+        assert_eq!(seg.content, b"original content");
+        assert!(seg.fold_ref.is_none());
+    }
+
+    #[test]
+    fn unfold_nonfolded_fails() {
+        let dir = TempDir::new().unwrap();
+        let mut store = ContextStore::open(&dir.path().join("contexts")).unwrap();
+        store.create("t1").unwrap();
+        store.add_segment("t1", make_segment("s1", "msg", b"active")).unwrap();
+
+        let err = store.unfold("t1", "s1").unwrap_err();
+        assert!(matches!(err, KernelError::InvalidData(_)));
+
+        // Also test shelved
+        store.page_out("t1", "s1").unwrap();
+        let err = store.unfold("t1", "s1").unwrap_err();
+        assert!(matches!(err, KernelError::InvalidData(_)));
+    }
+
+    #[test]
+    fn fold_ref_populated() {
+        let dir = TempDir::new().unwrap();
+        let mut store = ContextStore::open(&dir.path().join("contexts")).unwrap();
+        store.create("t1").unwrap();
+        store.add_segment("t1", make_segment("s1", "code", b"data")).unwrap();
+
+        store.fold("t1", "s1", b"[folded]".to_vec()).unwrap();
+
+        let seg = store.get_segment("t1", "s1").unwrap();
+        let fold_ref = seg.fold_ref.as_ref().unwrap();
+        assert!(fold_ref.contains("t1"));
+        assert!(fold_ref.contains("s1"));
+    }
+
+    #[test]
+    fn fold_store_grows_on_fold() {
+        let dir = TempDir::new().unwrap();
+        let mut store = ContextStore::open(&dir.path().join("contexts")).unwrap();
+        store.create("t1").unwrap();
+        store.add_segment("t1", make_segment("s1", "code", b"data1")).unwrap();
+        store.add_segment("t1", make_segment("s2", "code", b"data2")).unwrap();
+
+        assert_eq!(store.fold_store_len(), 0);
+        store.fold("t1", "s1", b"[f1]".to_vec()).unwrap();
+        assert_eq!(store.fold_store_len(), 1);
+        store.fold("t1", "s2", b"[f2]".to_vec()).unwrap();
+        assert_eq!(store.fold_store_len(), 2);
+    }
+
+    #[test]
+    fn fold_store_shrinks_on_unfold() {
+        let dir = TempDir::new().unwrap();
+        let mut store = ContextStore::open(&dir.path().join("contexts")).unwrap();
+        store.create("t1").unwrap();
+        store.add_segment("t1", make_segment("s1", "code", b"data")).unwrap();
+
+        store.fold("t1", "s1", b"[folded]".to_vec()).unwrap();
+        assert_eq!(store.fold_store_len(), 1);
+
+        store.unfold("t1", "s1").unwrap();
+        assert_eq!(store.fold_store_len(), 0);
+    }
+
+    #[test]
+    fn get_inventory_folded_count() {
+        let dir = TempDir::new().unwrap();
+        let mut store = ContextStore::open(&dir.path().join("contexts")).unwrap();
+        store.create("t1").unwrap();
+        store.add_segment("t1", make_segment("s1", "code", b"active")).unwrap();
+        store.add_segment("t1", make_segment("s2", "msg", b"to fold")).unwrap();
+        let mut shelved = make_segment("s3", "doc", b"shelved");
+        shelved.status = SegmentStatus::Shelved;
+        store.add_segment("t1", shelved).unwrap();
+
+        store.fold("t1", "s2", b"[folded]".to_vec()).unwrap();
+
+        let inv = store.get_inventory("t1").unwrap();
+        assert_eq!(inv.active_count, 1);
+        assert_eq!(inv.shelved_count, 1);
+        assert_eq!(inv.folded_count, 1);
+    }
+
+    #[test]
+    fn working_set_excludes_folded() {
+        let dir = TempDir::new().unwrap();
+        let mut store = ContextStore::open(&dir.path().join("contexts")).unwrap();
+        store.create("t1").unwrap();
+        store.add_segment("t1", make_segment("s1", "code", b"active")).unwrap();
+        store.add_segment("t1", make_segment("s2", "msg", b"will fold")).unwrap();
+
+        store.fold("t1", "s2", b"[folded]".to_vec()).unwrap();
+
+        let ws = store.get_working_set("t1").unwrap();
+        assert_eq!(ws.len(), 1);
+        assert_eq!(ws[0].id, "s1");
+    }
+
+    #[test]
+    fn wal_replay_fold() {
+        let dir = TempDir::new().unwrap();
+        let mut store = ContextStore::open(&dir.path().join("contexts")).unwrap();
+        store.apply_wal_entry(&WalEntry::new(EntryType::ContextAllocate, b"t1".to_vec()));
+        let seg = make_segment("s1", "code", b"original content");
+        store.apply_wal_entry(&ContextStore::wal_entry_segment_add("t1", &seg));
+
+        // Replay fold WAL entry
+        let fold_wal = ContextStore::wal_entry_fold("t1", "s1", "fold-t1-s1", b"[summary]");
+        store.apply_wal_entry(&fold_wal);
+
+        let seg = store.get_segment("t1", "s1").unwrap();
+        assert_eq!(seg.status, SegmentStatus::Folded);
+        assert_eq!(seg.content, b"[summary]");
+        assert_eq!(seg.fold_ref.as_deref(), Some("fold-t1-s1"));
+        assert_eq!(store.fold_store_len(), 1);
+    }
+
+    #[test]
+    fn wal_replay_unfold() {
+        let dir = TempDir::new().unwrap();
+        let mut store = ContextStore::open(&dir.path().join("contexts")).unwrap();
+        store.apply_wal_entry(&WalEntry::new(EntryType::ContextAllocate, b"t1".to_vec()));
+        let seg = make_segment("s1", "code", b"original");
+        store.apply_wal_entry(&ContextStore::wal_entry_segment_add("t1", &seg));
+
+        // Fold via WAL
+        let fold_wal = ContextStore::wal_entry_fold("t1", "s1", "fold-t1-s1", b"[summary]");
+        store.apply_wal_entry(&fold_wal);
+
+        // Unfold via WAL
+        let unfold_wal = ContextStore::wal_entry_unfold("t1", "s1");
+        store.apply_wal_entry(&unfold_wal);
+
+        let seg = store.get_segment("t1", "s1").unwrap();
+        assert_eq!(seg.status, SegmentStatus::Active);
+        assert_eq!(seg.content, b"original");
+        assert!(seg.fold_ref.is_none());
+        assert_eq!(store.fold_store_len(), 0);
+    }
+
+    #[test]
+    fn fold_then_unfold_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let mut store = ContextStore::open(&dir.path().join("contexts")).unwrap();
+        store.create("t1").unwrap();
+
+        let original_content = b"fn complex_function() { /* lots of code */ }";
+        store.add_segment("t1", make_segment("s1", "code", original_content)).unwrap();
+
+        // Fold
+        store.fold("t1", "s1", b"[summary: complex function]".to_vec()).unwrap();
+        assert_eq!(store.get_segment("t1", "s1").unwrap().status, SegmentStatus::Folded);
+        assert_ne!(store.get_segment("t1", "s1").unwrap().content, original_content);
+
+        // Unfold
+        store.unfold("t1", "s1").unwrap();
+        let seg = store.get_segment("t1", "s1").unwrap();
+        assert_eq!(seg.status, SegmentStatus::Active);
+        assert_eq!(seg.content, original_content);
+        assert!(seg.fold_ref.is_none());
+        assert_eq!(store.fold_store_len(), 0);
     }
 }

@@ -24,6 +24,12 @@ pub fn build_context_tree<'a>(ctx: &ContextView) -> Vec<TreeItem<'a, String>> {
         .filter(|s| s.status == SegmentStatus::Active)
         .collect();
 
+    let folded_segs: Vec<_> = ctx
+        .segments
+        .iter()
+        .filter(|s| s.status == SegmentStatus::Folded)
+        .collect();
+
     let shelved_segs: Vec<_> = ctx
         .segments
         .iter()
@@ -61,6 +67,38 @@ pub fn build_context_tree<'a>(ctx: &ContextView) -> Vec<TreeItem<'a, String>> {
         .expect("tree item creation"),
     );
 
+    // Folded group (between Active and Shelved)
+    if !folded_segs.is_empty() {
+        let folded_bytes: usize = folded_segs.iter().map(|s| s.size).sum();
+        let folded_label = format!(
+            "Folded ({} segments, {})",
+            folded_segs.len(),
+            dashboard::format_bytes(folded_bytes),
+        );
+        let folded_children: Vec<TreeItem<'a, String>> = folded_segs
+            .iter()
+            .map(|s| {
+                let bar = relevance_bar(s.relevance);
+                let label = format!(
+                    "{}:{}  [{bar}] {:.2}  {}",
+                    s.tag,
+                    s.id,
+                    s.relevance,
+                    dashboard::format_bytes(s.size),
+                );
+                TreeItem::new_leaf(format!("folded-{}", s.id), label)
+            })
+            .collect();
+        items.push(
+            TreeItem::new(
+                "folded".to_string(),
+                folded_label,
+                folded_children,
+            )
+            .expect("tree item creation"),
+        );
+    }
+
     // Shelved group
     let shelved_bytes = ctx.total_bytes.saturating_sub(ctx.active_bytes);
     let shelved_label = format!(
@@ -92,6 +130,15 @@ pub fn build_context_tree<'a>(ctx: &ContextView) -> Vec<TreeItem<'a, String>> {
     );
 
     items
+}
+
+/// Get the color for a segment status.
+pub fn status_color(status: SegmentStatus) -> Color {
+    match status {
+        SegmentStatus::Active => Color::Green,
+        SegmentStatus::Shelved => Color::DarkGray,
+        SegmentStatus::Folded => Color::Blue,
+    }
 }
 
 /// Create a relevance bar string.
@@ -126,6 +173,7 @@ mod tests {
             segments: vec![],
             active_count: 0,
             shelved_count: 0,
+            folded_count: 0,
             total_bytes: 0,
             active_bytes: 0,
         };
@@ -155,6 +203,7 @@ mod tests {
             ],
             active_count: 1,
             shelved_count: 1,
+            folded_count: 0,
             total_bytes: 150,
             active_bytes: 100,
         };
@@ -175,6 +224,7 @@ mod tests {
             }],
             active_count: 1,
             shelved_count: 0,
+            folded_count: 0,
             total_bytes: 2048,
             active_bytes: 2048,
         };
@@ -202,5 +252,144 @@ mod tests {
         let bar = relevance_bar(0.1);
         let filled = bar.chars().filter(|c| *c == '|').count();
         assert_eq!(filled, 1);
+    }
+
+    // ── Folding Context tests (Milestone 4) ──
+
+    #[test]
+    fn context_view_folded_count() {
+        use crate::kernel::context_store::{ContextInventory, SegmentMeta};
+        let inv = ContextInventory {
+            thread_id: "t1".into(),
+            segments: vec![
+                SegmentMeta {
+                    id: "s1".into(),
+                    tag: "code".into(),
+                    size: 100,
+                    status: SegmentStatus::Folded,
+                    relevance: 0.5,
+                    created_at: 0,
+                },
+            ],
+            active_count: 0,
+            shelved_count: 0,
+            folded_count: 1,
+            total_bytes: 100,
+            active_bytes: 0,
+        };
+        let view = ContextView::from(&inv);
+        assert_eq!(view.folded_count, 1);
+    }
+
+    #[test]
+    fn build_tree_folded_group() {
+        let ctx = ContextView {
+            thread_id: "t1".into(),
+            segments: vec![
+                SegmentView {
+                    id: "s1".into(),
+                    tag: "code".into(),
+                    size: 100,
+                    status: SegmentStatus::Active,
+                    relevance: 0.9,
+                },
+                SegmentView {
+                    id: "s2".into(),
+                    tag: "msg".into(),
+                    size: 30,
+                    status: SegmentStatus::Folded,
+                    relevance: 0.4,
+                },
+                SegmentView {
+                    id: "s3".into(),
+                    tag: "doc".into(),
+                    size: 50,
+                    status: SegmentStatus::Shelved,
+                    relevance: 0.2,
+                },
+            ],
+            active_count: 1,
+            shelved_count: 1,
+            folded_count: 1,
+            total_bytes: 180,
+            active_bytes: 100,
+        };
+        let tree = build_context_tree(&ctx);
+        assert_eq!(tree.len(), 3); // Active, Folded, Shelved
+    }
+
+    #[test]
+    fn build_tree_no_folded() {
+        let ctx = ContextView {
+            thread_id: "t1".into(),
+            segments: vec![
+                SegmentView {
+                    id: "s1".into(),
+                    tag: "code".into(),
+                    size: 100,
+                    status: SegmentStatus::Active,
+                    relevance: 0.9,
+                },
+            ],
+            active_count: 1,
+            shelved_count: 0,
+            folded_count: 0,
+            total_bytes: 100,
+            active_bytes: 100,
+        };
+        let tree = build_context_tree(&ctx);
+        assert_eq!(tree.len(), 2); // Active and Shelved only (no Folded group)
+    }
+
+    #[test]
+    fn segment_view_folded_status() {
+        let sv = SegmentView {
+            id: "s1".into(),
+            tag: "code".into(),
+            size: 50,
+            status: SegmentStatus::Folded,
+            relevance: 0.5,
+        };
+        assert_eq!(sv.status, SegmentStatus::Folded);
+    }
+
+    #[test]
+    fn relevance_color_folded() {
+        // Folded segments get a distinct color (blue)
+        let color = status_color(SegmentStatus::Folded);
+        assert_eq!(color, Color::Blue);
+    }
+
+    #[test]
+    fn dashboard_shows_folded_count() {
+        let ctx = ContextView {
+            thread_id: "t1".into(),
+            segments: vec![
+                SegmentView {
+                    id: "s1".into(),
+                    tag: "code".into(),
+                    size: 30,
+                    status: SegmentStatus::Folded,
+                    relevance: 0.5,
+                },
+                SegmentView {
+                    id: "s2".into(),
+                    tag: "code".into(),
+                    size: 30,
+                    status: SegmentStatus::Folded,
+                    relevance: 0.3,
+                },
+            ],
+            active_count: 0,
+            shelved_count: 0,
+            folded_count: 2,
+            total_bytes: 60,
+            active_bytes: 0,
+        };
+        // Verify the folded_count is accessible and correct
+        assert_eq!(ctx.folded_count, 2);
+        // Build tree should include folded group
+        let tree = build_context_tree(&ctx);
+        assert!(tree.len() >= 3); // Active, Folded, Shelved
     }
 }

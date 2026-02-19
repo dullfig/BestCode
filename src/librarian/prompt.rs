@@ -9,7 +9,9 @@ use crate::llm::types::Message;
 /// System prompt for curation requests.
 pub const CURATION_SYSTEM: &str = "\
 You are a context librarian. Your job is to decide which context segments should be \
-active (paged in) and which should be shelved (paged out) for an upcoming LLM call. \
+active (paged in), shelved (paged out), or folded (compressed to summary) for an upcoming LLM call. \
+Folded segments retain a summary visible to the model; the full content can be unfolded on demand. \
+Use folding for context that may be needed later but is not immediately relevant. \
 Consider the incoming messages and the segment metadata to make your decision. \
 Stay within the token budget. Respond ONLY with a CurationDecision XML block.";
 
@@ -23,6 +25,8 @@ how relevant it is to the given query. Respond ONLY with a ScoringResult XML blo
 pub struct CurationDecision {
     pub page_in: Vec<String>,
     pub page_out: Vec<String>,
+    pub fold: Vec<String>,
+    pub unfold: Vec<String>,
 }
 
 /// Build the curation prompt sent to Haiku.
@@ -54,6 +58,7 @@ pub fn build_curation_prompt(
         let status_str = match seg.status {
             SegmentStatus::Active => "active",
             SegmentStatus::Shelved => "shelved",
+            SegmentStatus::Folded => "folded",
         };
         prompt.push_str(&format!(
             "    <segment id=\"{}\" tag=\"{}\" size=\"{}\" status=\"{}\" relevance=\"{:.2}\"/>\n",
@@ -63,9 +68,10 @@ pub fn build_curation_prompt(
     prompt.push_str("  </inventory>\n");
 
     prompt.push_str(&format!(
-        "  <summary active=\"{}\" shelved=\"{}\" active_bytes=\"{}\" total_bytes=\"{}\"/>\n",
+        "  <summary active=\"{}\" shelved=\"{}\" folded=\"{}\" active_bytes=\"{}\" total_bytes=\"{}\"/>\n",
         inventory.active_count,
         inventory.shelved_count,
+        inventory.folded_count,
         inventory.active_bytes,
         inventory.total_bytes
     ));
@@ -96,6 +102,8 @@ pub fn build_scoring_prompt(inventory: &ContextInventory, query: &str) -> String
 pub fn parse_curation_response(response: &str) -> Result<CurationDecision, String> {
     let mut page_in = Vec::new();
     let mut page_out = Vec::new();
+    let mut fold = Vec::new();
+    let mut unfold = Vec::new();
 
     // Parse <page_in> section
     if let Some(section) = extract_section(response, "page_in") {
@@ -111,7 +119,21 @@ pub fn parse_curation_response(response: &str) -> Result<CurationDecision, Strin
         }
     }
 
-    Ok(CurationDecision { page_in, page_out })
+    // Parse <fold> section
+    if let Some(section) = extract_section(response, "fold") {
+        for id in extract_segment_ids(&section) {
+            fold.push(id);
+        }
+    }
+
+    // Parse <unfold> section
+    if let Some(section) = extract_section(response, "unfold") {
+        for id in extract_segment_ids(&section) {
+            unfold.push(id);
+        }
+    }
+
+    Ok(CurationDecision { page_in, page_out, fold, unfold })
 }
 
 /// Parse Haiku's scoring response.
@@ -221,6 +243,7 @@ mod tests {
             ],
             active_count: 1,
             shelved_count: 2,
+            folded_count: 0,
             total_bytes: 3500,
             active_bytes: 500,
         }
@@ -297,5 +320,108 @@ mod tests {
         assert!(prompt.contains("<ScoringRequest>"));
         assert!(prompt.contains("<query>parsing</query>"));
         assert!(prompt.contains("code:parser.rs"));
+    }
+
+    // ── Folding Context tests (Milestone 3) ──
+
+    #[test]
+    fn curation_prompt_includes_folded_status() {
+        let inv = ContextInventory {
+            thread_id: "t1".into(),
+            segments: vec![
+                SegmentMeta {
+                    id: "s1".into(),
+                    tag: "code".into(),
+                    size: 100,
+                    status: SegmentStatus::Folded,
+                    relevance: 0.5,
+                    created_at: 0,
+                },
+            ],
+            active_count: 0,
+            shelved_count: 0,
+            folded_count: 1,
+            total_bytes: 100,
+            active_bytes: 0,
+        };
+        let msgs = vec![Message::text("user", "test")];
+        let prompt = build_curation_prompt(&inv, &msgs, 8000);
+        assert!(prompt.contains("status=\"folded\""));
+    }
+
+    #[test]
+    fn parse_fold_decision() {
+        let response = r#"
+<CurationDecision>
+  <fold>
+    <segment id="code:old.rs" reason="no longer relevant"/>
+    <segment id="msg-002" reason="stale"/>
+  </fold>
+</CurationDecision>"#;
+
+        let decision = parse_curation_response(response).unwrap();
+        assert_eq!(decision.fold, vec!["code:old.rs", "msg-002"]);
+    }
+
+    #[test]
+    fn parse_unfold_decision() {
+        let response = r#"
+<CurationDecision>
+  <unfold>
+    <segment id="code:needed.rs" reason="user asks about this"/>
+  </unfold>
+</CurationDecision>"#;
+
+        let decision = parse_curation_response(response).unwrap();
+        assert_eq!(decision.unfold, vec!["code:needed.rs"]);
+    }
+
+    #[test]
+    fn parse_empty_fold_unfold() {
+        let response = r#"
+<CurationDecision>
+  <page_in>
+    <segment id="s1"/>
+  </page_in>
+</CurationDecision>"#;
+
+        let decision = parse_curation_response(response).unwrap();
+        assert!(decision.fold.is_empty());
+        assert!(decision.unfold.is_empty());
+        assert_eq!(decision.page_in, vec!["s1"]);
+    }
+
+    #[test]
+    fn curation_decision_has_fold_fields() {
+        let decision = CurationDecision {
+            page_in: vec!["a".into()],
+            page_out: vec!["b".into()],
+            fold: vec!["c".into()],
+            unfold: vec!["d".into()],
+        };
+        assert_eq!(decision.fold.len(), 1);
+        assert_eq!(decision.unfold.len(), 1);
+    }
+
+    #[test]
+    fn librarian_system_prompt_mentions_folding() {
+        assert!(CURATION_SYSTEM.contains("folded"));
+        assert!(CURATION_SYSTEM.contains("summary"));
+        assert!(CURATION_SYSTEM.contains("unfold"));
+    }
+
+    #[test]
+    fn build_curation_prompt_summary_line() {
+        let inv = ContextInventory {
+            thread_id: "t1".into(),
+            segments: vec![],
+            active_count: 2,
+            shelved_count: 1,
+            folded_count: 3,
+            total_bytes: 5000,
+            active_bytes: 3000,
+        };
+        let prompt = build_curation_prompt(&inv, &[], 8000);
+        assert!(prompt.contains("folded=\"3\""));
     }
 }

@@ -86,6 +86,7 @@ impl Handler for LibrarianHandler {
                                 let status = match s.status {
                                     crate::kernel::context_store::SegmentStatus::Active => "active",
                                     crate::kernel::context_store::SegmentStatus::Shelved => "shelved",
+                                    crate::kernel::context_store::SegmentStatus::Folded => "folded",
                                 };
                                 format!(
                                     "<segment id=\"{}\" tag=\"{}\" size=\"{}\" status=\"{}\" relevance=\"{:.2}\"/>",
