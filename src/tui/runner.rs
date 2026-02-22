@@ -50,20 +50,32 @@ pub async fn refresh_from_kernel(app: &mut TuiApp, kernel: &Arc<Mutex<Kernel>>) 
 }
 
 /// Inject a task from the input bar into the pipeline.
+///
+/// Discovers the first agent listener dynamically from the organism config,
+/// rather than hardcoding "coding-agent".
 async fn inject_task(pipeline: &AgentPipeline, kernel: &Arc<Mutex<Kernel>>, task: &str) {
     let root_uuid = {
         let k = kernel.lock().await;
         k.threads().root_uuid().map(|s| s.to_string())
     };
 
+    // Find the first agent listener
+    let agent = pipeline.organism().agent_listeners();
+    let agent_def = match agent.first() {
+        Some(def) => def,
+        None => return, // no agents configured
+    };
+    let agent_name = agent_def.name.clone();
+    let payload_tag = agent_def.payload_tag.clone();
+
     if let Some(uuid) = root_uuid {
         let escaped = xml_escape(task);
-        let xml = format!("<AgentTask><task>{escaped}</task></AgentTask>");
+        let xml = format!("<{payload_tag}><task>{escaped}</task></{payload_tag}>");
         if let Ok(envelope) =
-            build_envelope("user", "coding-agent", &uuid, xml.as_bytes())
+            build_envelope("user", &agent_name, &uuid, xml.as_bytes())
         {
             let _ = pipeline
-                .inject_checked(envelope, &uuid, "coding", "coding-agent")
+                .inject_checked(envelope, &uuid, "coding", &agent_name)
                 .await;
         }
     }

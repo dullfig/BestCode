@@ -101,6 +101,7 @@ mod tests {
                 librarian: false,
                 wasm: None,
                 semantic_description: None,
+                agent_config: None,
             })
             .unwrap();
         }

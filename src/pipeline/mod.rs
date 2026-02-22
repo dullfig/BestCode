@@ -508,86 +508,117 @@ impl AgentPipelineBuilder {
         Ok(self)
     }
 
-    /// Attach a CodingAgent and register the `coding-agent` handler.
+    /// Register all agent listeners from the organism config.
     ///
-    /// Requires an LLM pool to be attached first (the agent calls the pool's default model).
-    /// The organism config must have a listener named `coding-agent`.
-    /// Automatically collects tool definitions from the listener's peers.
-    /// If WASM tools are loaded, their definitions are included automatically.
-    pub fn with_coding_agent(mut self) -> Result<Self, String> {
+    /// Iterates `organism.agent_listeners()`, for each:
+    /// - Collects tool definitions from peers
+    /// - Resolves the prompt (YAML-defined or legacy)
+    /// - Creates handler via `from_config()`
+    /// - Wires librarian, router, event sender
+    /// - Registers handler + ToolResponse route
+    ///
+    /// Requires an LLM pool to be attached first.
+    pub fn with_agents(mut self) -> Result<Self, String> {
         let pool = self.llm_pool.clone().ok_or_else(|| {
-            "with_coding_agent() requires LLM pool — call with_llm_pool() first".to_string()
+            "with_agents() requires LLM pool — call with_llm_pool() first".to_string()
         })?;
 
-        // Get the coding-agent listener definition
-        let def = self
+        // Collect agent listener defs (cloned to avoid borrow conflict)
+        let agent_defs: Vec<_> = self
             .organism
+            .agent_listeners()
+            .into_iter()
+            .cloned()
+            .collect();
+
+        if agent_defs.is_empty() {
+            return Err("with_agents() found no agent listeners in organism config".to_string());
+        }
+
+        // Take the semantic router (can only be given to one agent — first one)
+        let mut router_opt = self.semantic_router.take();
+
+        for def in &agent_defs {
+            // Build tool definitions from the listener's declared peers,
+            // with WASM registry fallback for dynamic tools
+            let peer_names: Vec<&str> = def.peers.iter().map(|s| s.as_str()).collect();
+            let tool_definitions = agent_tools::build_tool_definitions_with_wasm(
+                &peer_names,
+                self.wasm_registry.as_ref(),
+            );
+
+            // Build tool descriptions for prompt interpolation
+            let tool_descs: Vec<(String, String)> = tool_definitions
+                .iter()
+                .map(|d| (d.name.clone(), d.description.clone()))
+                .collect();
+
+            // Resolve prompt: YAML-defined or legacy fallback
+            let prompt_spec = def
+                .agent_config
+                .as_ref()
+                .and_then(|c| c.prompt.as_deref());
+            let system_prompt = prompts::resolve_prompt(
+                prompt_spec,
+                self.organism.prompts(),
+                &tool_descs,
+            )?;
+
+            // Get config (or default)
+            let config = def
+                .agent_config
+                .as_ref()
+                .cloned()
+                .unwrap_or_default();
+
+            // Create handler from config
+            let mut handler = CodingAgentHandler::from_config(
+                pool.clone(),
+                tool_definitions,
+                system_prompt,
+                &config,
+            );
+
+            // Attach librarian if available
+            if let Some(ref lib) = self.librarian {
+                handler = handler.with_librarian_attached(lib.clone());
+            }
+
+            // Attach semantic router to the first agent that gets it
+            if let Some(router) = router_opt.take() {
+                handler = handler.with_router_attached(router);
+            }
+
+            // Wire the event sender
+            handler.set_event_sender(self.event_tx.clone());
+
+            self = self.register(&def.name, handler)?;
+
+            // Register ToolResponse route so tool replies route back
+            self.registry.routing.register(
+                &def.name,
+                "ToolResponse",
+                def.is_agent,
+                def.peers.clone(),
+                &def.description,
+            );
+        }
+
+        Ok(self)
+    }
+
+    /// Attach a CodingAgent and register the `coding-agent` handler.
+    ///
+    /// Legacy convenience method — delegates to `with_agents()`.
+    /// Requires 'coding-agent' listener in organism config.
+    pub fn with_coding_agent(self) -> Result<Self, String> {
+        self.organism
             .get_listener("coding-agent")
             .ok_or_else(|| {
                 "with_coding_agent() requires 'coding-agent' listener in organism config"
                     .to_string()
-            })?
-            .clone();
-
-        // Build tool definitions from the listener's declared peers,
-        // with WASM registry fallback for dynamic tools
-        let peer_names: Vec<&str> = def.peers.iter().map(|s| s.as_str()).collect();
-        let tool_definitions = agent_tools::build_tool_definitions_with_wasm(
-            &peer_names,
-            self.wasm_registry.as_ref(),
-        );
-
-        // Build tool descriptions for the system prompt
-        let tool_descs: Vec<(String, String)> = tool_definitions
-            .iter()
-            .map(|d| (d.name.clone(), d.description.clone()))
-            .collect();
-        let system_prompt = prompts::build_system_prompt(&tool_descs);
-
-        // Create the handler
-        let mut handler = if let Some(router) = self.semantic_router.take() {
-            let h = CodingAgentHandler::with_semantic_router(
-                pool,
-                router,
-                tool_definitions,
-                system_prompt,
-            );
-            if let Some(ref lib) = self.librarian {
-                // Note: with_semantic_router doesn't take a librarian, but the
-                // librarian is still available through the pipeline. For full
-                // integration, we'd need a builder on CodingAgentHandler, but
-                // for V1 the router and librarian are separate concerns.
-                let _ = lib;
-            }
-            h
-        } else if let Some(ref lib) = self.librarian {
-            CodingAgentHandler::with_librarian(
-                pool,
-                lib.clone(),
-                tool_definitions,
-                system_prompt,
-            )
-        } else {
-            CodingAgentHandler::new(pool, tool_definitions, system_prompt)
-        };
-
-        // Wire the event sender so the handler can emit AgentResponse events
-        handler.set_event_sender(self.event_tx.clone());
-
-        self = self.register("coding-agent", handler)?;
-
-        // Register additional route so tool responses (ToolResponse payload tag)
-        // can route back to coding-agent. Without this, the pipeline only knows
-        // coding-agent.agenttask and drops tool replies silently.
-        self.registry.routing.register(
-            "coding-agent",
-            "ToolResponse",
-            def.is_agent,
-            def.peers.clone(),
-            &def.description,
-        );
-
-        Ok(self)
+            })?;
+        self.with_agents()
     }
 
     /// Build the AgentPipeline.
@@ -2481,5 +2512,231 @@ profiles:
         };
         let _ = fill_event.clone();
         assert!(format!("{:?}", fill_event).contains("FormFillAttempt"));
+    }
+
+    // ── YAML-Defined Agents Integration Tests ──
+
+    fn multi_agent_organism() -> Organism {
+        let yaml = r#"
+organism:
+  name: multi-agent
+
+prompts:
+  safety: |
+    You are bounded. You do not pursue goals beyond your task.
+
+  coding_base: |
+    You are a coding agent.
+    {tool_definitions}
+
+  diag_base: |
+    You are a diagnostics agent. Report system health.
+    {tool_definitions}
+
+listeners:
+  - name: llm-pool
+    payload_class: llm.LlmRequest
+    handler: llm.handle
+    description: "LLM inference pool"
+    ports:
+      - port: 443
+        direction: outbound
+        protocol: https
+        hosts: [api.anthropic.com]
+
+  - name: file-read
+    payload_class: tools.FileReadRequest
+    handler: tools.file_read.handle
+    description: "File read"
+
+  - name: glob
+    payload_class: tools.GlobRequest
+    handler: tools.glob.handle
+    description: "Glob search"
+
+  - name: grep
+    payload_class: tools.GrepRequest
+    handler: tools.grep.handle
+    description: "Grep search"
+
+  - name: file-write
+    payload_class: tools.FileWriteRequest
+    handler: tools.file_write.handle
+    description: "File write"
+
+  - name: file-edit
+    payload_class: tools.FileEditRequest
+    handler: tools.file_edit.handle
+    description: "File edit"
+
+  - name: command-exec
+    payload_class: tools.CommandExecRequest
+    handler: tools.command_exec.handle
+    description: "Command execution"
+
+  - name: coding-agent
+    payload_class: agent.AgentTask
+    handler: agent.handle
+    description: "AI coding agent"
+    agent:
+      prompt: "safety & coding_base"
+      max_tokens: 4096
+    peers: [file-read, file-write, file-edit, glob, grep, command-exec]
+
+  - name: diagnostics
+    payload_class: agent.DiagnosticsTask
+    handler: agent.handle
+    description: "Diagnostics agent"
+    agent:
+      prompt: "safety & diag_base"
+      model: haiku
+    peers: [file-read, glob, grep]
+
+profiles:
+  coding:
+    linux_user: agentos-coding
+    listeners: [coding-agent, diagnostics, file-read, file-write, file-edit, glob, grep, command-exec, llm-pool]
+    network: [llm-pool]
+    journal: retain_forever
+"#;
+        parse_organism(yaml).unwrap()
+    }
+
+    #[tokio::test]
+    async fn with_agents_registers_all() {
+        let dir = TempDir::new().unwrap();
+        let org = multi_agent_organism();
+
+        let pool = crate::llm::LlmPool::with_base_url(
+            "test-key".into(),
+            "opus",
+            "http://localhost:19999".into(),
+        );
+
+        let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+            .with_llm_pool(pool)
+            .unwrap()
+            .register("file-read", crate::tools::file_read::FileReadTool)
+            .unwrap()
+            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .unwrap()
+            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .unwrap()
+            .register("glob", crate::tools::glob_tool::GlobTool)
+            .unwrap()
+            .register("grep", crate::tools::grep::GrepTool)
+            .unwrap()
+            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
+            .unwrap()
+            .with_agents()
+            .unwrap()
+            .build()
+            .unwrap();
+
+        // Both agents should be registered
+        assert!(pipeline.organism().get_listener("coding-agent").is_some());
+        assert!(pipeline.organism().get_listener("diagnostics").is_some());
+    }
+
+    #[tokio::test]
+    async fn with_agents_resolves_prompts() {
+        let org = multi_agent_organism();
+
+        // Verify prompts were parsed
+        assert!(org.get_prompt("safety").is_some());
+        assert!(org.get_prompt("coding_base").is_some());
+        assert!(org.get_prompt("diag_base").is_some());
+
+        // Verify agent configs
+        let coding = org.get_listener("coding-agent").unwrap();
+        let cfg = coding.agent_config.as_ref().unwrap();
+        assert_eq!(cfg.prompt.as_deref(), Some("safety & coding_base"));
+        assert_eq!(cfg.max_tokens, 4096);
+
+        let diag = org.get_listener("diagnostics").unwrap();
+        let dcfg = diag.agent_config.as_ref().unwrap();
+        assert_eq!(dcfg.prompt.as_deref(), Some("safety & diag_base"));
+        assert_eq!(dcfg.model.as_deref(), Some("haiku"));
+    }
+
+    #[tokio::test]
+    async fn with_agents_unknown_prompt_errors() {
+        let yaml = r#"
+organism:
+  name: bad-prompt
+
+listeners:
+  - name: agent
+    payload_class: agent.Task
+    handler: agent.handle
+    description: "Agent"
+    agent:
+      prompt: "nonexistent_label"
+    peers: []
+
+  - name: llm-pool
+    payload_class: llm.LlmRequest
+    handler: llm.handle
+    description: "LLM pool"
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [agent, llm-pool]
+    journal: retain_forever
+"#;
+        let org = parse_organism(yaml).unwrap();
+        let dir = TempDir::new().unwrap();
+
+        let pool = crate::llm::LlmPool::with_base_url(
+            "test-key".into(),
+            "opus",
+            "http://localhost:19999".into(),
+        );
+
+        let result = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+            .with_llm_pool(pool)
+            .unwrap()
+            .with_agents();
+
+        match result {
+            Err(e) => assert!(e.contains("unknown prompt label"), "unexpected error: {e}"),
+            Ok(_) => panic!("expected error for unknown prompt label"),
+        }
+    }
+
+    #[tokio::test]
+    async fn with_coding_agent_compat() {
+        let dir = TempDir::new().unwrap();
+        let org = multi_agent_organism();
+
+        let pool = crate::llm::LlmPool::with_base_url(
+            "test-key".into(),
+            "opus",
+            "http://localhost:19999".into(),
+        );
+
+        // with_coding_agent() should still work (delegates to with_agents())
+        let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+            .with_llm_pool(pool)
+            .unwrap()
+            .register("file-read", crate::tools::file_read::FileReadTool)
+            .unwrap()
+            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .unwrap()
+            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .unwrap()
+            .register("glob", crate::tools::glob_tool::GlobTool)
+            .unwrap()
+            .register("grep", crate::tools::grep::GrepTool)
+            .unwrap()
+            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
+            .unwrap()
+            .with_coding_agent()
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert!(pipeline.organism().get_listener("coding-agent").is_some());
     }
 }

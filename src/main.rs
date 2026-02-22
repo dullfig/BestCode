@@ -18,12 +18,32 @@ const DEFAULT_ORGANISM: &str = r#"
 organism:
   name: bestcode
 
+prompts:
+  coding_base: |
+    You are a coding agent running inside AgentOS. You have access to tools for file operations,
+    shell commands, and codebase indexing. Use these tools to complete the task you've been given.
+
+    Rules:
+    1. Read before you write. Always understand existing code before modifying it.
+    2. Make the smallest change that solves the problem.
+    3. Test your changes when possible (run tests, verify output).
+    4. If a tool call fails, analyze the error and try a different approach.
+    5. When done, provide a clear summary of what you did.
+
+    {tool_definitions}
+
+  no_paperclipper: |
+    You are bounded. You do not pursue goals beyond your task.
+    You report uncertainty rather than improvising.
+
 listeners:
   - name: coding-agent
     payload_class: agent.AgentTask
     handler: agent.handle
     description: "AI coding agent"
-    is_agent: true
+    agent:
+      prompt: "no_paperclipper & coding_base"
+      max_tokens: 4096
     librarian: true
     peers: [file-read, file-write, file-edit, glob, grep, command-exec, codebase-index]
 
@@ -185,7 +205,7 @@ async fn main() -> Result<()> {
         .to_anyhow()?
         .register("command-exec", CommandExecTool::new())
         .to_anyhow()?
-        .with_coding_agent()
+        .with_agents()
         .to_anyhow()?
         .build()
         .to_anyhow()?;

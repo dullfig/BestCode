@@ -38,6 +38,7 @@ use tokio::sync::{broadcast, Mutex};
 use crate::librarian::Librarian;
 use crate::llm::types::{ContentBlock, ToolDefinition, ToolResultBlock};
 use crate::llm::LlmPool;
+use crate::organism::AgentConfig;
 use crate::pipeline::events::PipelineEvent;
 use crate::routing::{RouteDecision, SemanticRouter};
 
@@ -66,7 +67,14 @@ pub struct CodingAgentHandler {
     max_routing_iterations: usize,
     /// Optional event sender for emitting AgentResponse events to the TUI.
     event_tx: Option<broadcast::Sender<PipelineEvent>>,
+    /// Max tokens for LLM completion (from AgentConfig).
+    max_tokens: u32,
+    /// Model override. None = pool default.
+    model: Option<String>,
 }
+
+/// Type alias — generic agent handler (same implementation, data-driven identity).
+pub type AgentHandler = CodingAgentHandler;
 
 /// Default max routing iterations per turn.
 const DEFAULT_MAX_ROUTING_ITERATIONS: usize = 5;
@@ -87,6 +95,29 @@ impl CodingAgentHandler {
             semantic_router: None,
             max_routing_iterations: DEFAULT_MAX_ROUTING_ITERATIONS,
             event_tx: None,
+            max_tokens: 4096,
+            model: None,
+        }
+    }
+
+    /// Create from an AgentConfig (YAML-defined agent).
+    pub fn from_config(
+        pool: Arc<Mutex<LlmPool>>,
+        tool_definitions: Vec<ToolDefinition>,
+        system_prompt: String,
+        config: &AgentConfig,
+    ) -> Self {
+        Self {
+            pool,
+            librarian: None,
+            tool_definitions,
+            threads: Arc::new(Mutex::new(HashMap::new())),
+            system_prompt,
+            semantic_router: None,
+            max_routing_iterations: config.max_iterations,
+            event_tx: None,
+            max_tokens: config.max_tokens,
+            model: config.model.clone(),
         }
     }
 
@@ -106,6 +137,8 @@ impl CodingAgentHandler {
             semantic_router: None,
             max_routing_iterations: DEFAULT_MAX_ROUTING_ITERATIONS,
             event_tx: None,
+            max_tokens: 4096,
+            model: None,
         }
     }
 
@@ -125,7 +158,21 @@ impl CodingAgentHandler {
             semantic_router: Some(router),
             max_routing_iterations: DEFAULT_MAX_ROUTING_ITERATIONS,
             event_tx: None,
+            max_tokens: 4096,
+            model: None,
         }
+    }
+
+    /// Attach a librarian to an existing handler (builder-style).
+    pub fn with_librarian_attached(mut self, lib: Arc<Mutex<Librarian>>) -> Self {
+        self.librarian = Some(lib);
+        self
+    }
+
+    /// Attach a semantic router to an existing handler (builder-style).
+    pub fn with_router_attached(mut self, router: SemanticRouter) -> Self {
+        self.semantic_router = Some(router);
+        self
     }
 
     /// Set the maximum routing iterations per turn.
@@ -217,9 +264,9 @@ impl CodingAgentHandler {
 
         let pool = self.pool.lock().await;
         pool.complete_with_tools(
-            None, // use pool's default model (set by --model CLI flag)
+            self.model.as_deref(),
             thread.messages.clone(),
-            4096,
+            self.max_tokens,
             Some(&system),
             self.tool_definitions.clone(),
         )
@@ -1150,5 +1197,78 @@ mod tests {
         );
         handler.set_max_routing_iterations(3);
         assert_eq!(handler.max_routing_iterations, 3);
+    }
+
+    // ── YAML-Defined Agents: from_config, builder attachment tests ──
+
+    #[test]
+    fn from_config_default() {
+        let pool = mock_pool();
+        let config = AgentConfig::default();
+        let handler = CodingAgentHandler::from_config(
+            pool,
+            sample_tool_defs(),
+            "test prompt".into(),
+            &config,
+        );
+        assert_eq!(handler.max_tokens, 4096);
+        assert_eq!(handler.model, None);
+        assert_eq!(handler.max_routing_iterations, 5);
+        assert_eq!(handler.system_prompt, "test prompt");
+    }
+
+    #[test]
+    fn from_config_custom_tokens() {
+        let pool = mock_pool();
+        let config = AgentConfig {
+            max_tokens: 8192,
+            ..AgentConfig::default()
+        };
+        let handler = CodingAgentHandler::from_config(
+            pool,
+            sample_tool_defs(),
+            "test".into(),
+            &config,
+        );
+        assert_eq!(handler.max_tokens, 8192);
+    }
+
+    #[test]
+    fn from_config_custom_model() {
+        let pool = mock_pool();
+        let config = AgentConfig {
+            model: Some("haiku".into()),
+            ..AgentConfig::default()
+        };
+        let handler = CodingAgentHandler::from_config(
+            pool,
+            sample_tool_defs(),
+            "test".into(),
+            &config,
+        );
+        assert_eq!(handler.model.as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn builder_attach_librarian() {
+        let pool = mock_pool();
+        let kernel =
+            crate::kernel::Kernel::open(&tempfile::TempDir::new().unwrap().path().join("data"))
+                .unwrap();
+        let kernel_arc = Arc::new(Mutex::new(kernel));
+        let lib = Arc::new(Mutex::new(Librarian::new(pool.clone(), kernel_arc)));
+
+        let handler = CodingAgentHandler::new(pool, sample_tool_defs(), "test".into())
+            .with_librarian_attached(lib);
+        assert!(handler.librarian.is_some());
+    }
+
+    #[test]
+    fn builder_attach_router() {
+        let pool = mock_pool();
+        let router = build_test_router();
+        let handler = CodingAgentHandler::new(pool, sample_tool_defs(), "test".into())
+            .with_router_attached(router);
+        assert!(handler.has_semantic_router());
     }
 }

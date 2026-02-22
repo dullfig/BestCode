@@ -9,7 +9,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use super::profile::{RetentionPolicy, SecurityProfile};
-use super::{ListenerDef, Organism, PortDef, WasmToolConfig};
+use super::{AgentConfig, ListenerDef, Organism, PortDef, WasmToolConfig};
 use crate::wasm::capabilities::{EnvGrant, FsGrant, WasmCapabilities};
 
 /// Top-level YAML structure.
@@ -20,6 +20,8 @@ struct OrganismYaml {
     listeners: Vec<ListenerYaml>,
     #[serde(default)]
     profiles: std::collections::HashMap<String, ProfileYaml>,
+    #[serde(default)]
+    prompts: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,8 +35,10 @@ struct ListenerYaml {
     payload_class: String,
     handler: String,
     description: String,
-    #[serde(default)]
-    agent: bool,
+    /// Supports both `agent: true` (bool) and `agent: { prompt: ... }` (config block).
+    /// Also supports `is_agent: true` as an alias.
+    #[serde(default, alias = "is_agent")]
+    agent: AgentFieldYaml,
     #[serde(default)]
     peers: Vec<String>,
     #[serde(default)]
@@ -47,6 +51,33 @@ struct ListenerYaml {
     wasm: Option<WasmYaml>,
     #[serde(default)]
     semantic_description: Option<String>,
+}
+
+/// Agent field: bool or config block (untagged for YAML flexibility).
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum AgentFieldYaml {
+    Bool(bool),
+    Config(AgentConfigYaml),
+}
+
+impl Default for AgentFieldYaml {
+    fn default() -> Self {
+        AgentFieldYaml::Bool(false)
+    }
+}
+
+/// Agent configuration block parsed from YAML.
+#[derive(Debug, Deserialize)]
+struct AgentConfigYaml {
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    max_iterations: Option<usize>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,6 +171,16 @@ pub fn parse_organism(yaml: &str) -> Result<Organism, String> {
 
     let mut org = Organism::new(&raw.organism.name);
 
+    // Register prompts (resolve file: prefixes)
+    for (name, value) in raw.prompts {
+        if let Some(path) = value.strip_prefix("file:") {
+            let content = crate::agent::prompts::load_prompt_file(Path::new(path.trim()))?;
+            org.register_prompt(name, content);
+        } else {
+            org.register_prompt(name, value);
+        }
+    }
+
     // Register listeners
     for l in raw.listeners {
         let payload_tag = l
@@ -160,17 +201,38 @@ pub fn parse_organism(yaml: &str) -> Result<Organism, String> {
             })
             .collect();
 
+        // Resolve agent field: bool or config block
+        let (is_agent, agent_config) = match l.agent {
+            AgentFieldYaml::Config(cfg) => {
+                let config = AgentConfig {
+                    prompt: cfg.prompt,
+                    max_tokens: cfg.max_tokens.unwrap_or(4096),
+                    max_iterations: cfg.max_iterations.unwrap_or(5),
+                    model: cfg.model,
+                };
+                (true, Some(config))
+            }
+            AgentFieldYaml::Bool(b) => {
+                if b {
+                    (true, Some(AgentConfig::default()))
+                } else {
+                    (false, None)
+                }
+            }
+        };
+
         org.register_listener(ListenerDef {
             name: l.name,
             payload_tag,
             handler: l.handler,
             description: l.description,
-            is_agent: l.agent,
+            is_agent,
             peers: l.peers,
             model: l.model,
             ports,
             librarian: l.librarian,
             semantic_description: l.semantic_description,
+            agent_config,
             wasm: l.wasm.map(|w| {
                 let caps = match w.capabilities {
                     Some(c) => WasmCapabilities {
@@ -615,5 +677,203 @@ profiles:
         let org = parse_organism(yaml).unwrap();
         let shell = org.get_listener("shell").unwrap();
         assert!(shell.semantic_description.is_none());
+    }
+
+    // ── YAML-Defined Agents: prompts section, agent config block ──
+
+    #[test]
+    fn parse_prompts_section() {
+        let yaml = r#"
+organism:
+  name: test-prompts
+
+prompts:
+  greeting: "Hello, agent!"
+  safety: |
+    You are bounded.
+    You do not pursue goals beyond your task.
+
+listeners: []
+"#;
+        let org = parse_organism(yaml).unwrap();
+        assert_eq!(org.get_prompt("greeting"), Some("Hello, agent!"));
+        assert!(org.get_prompt("safety").unwrap().contains("You are bounded"));
+        assert_eq!(org.prompts().len(), 2);
+    }
+
+    #[test]
+    fn parse_agent_config_block() {
+        let yaml = r#"
+organism:
+  name: test-agent-config
+
+listeners:
+  - name: coding-agent
+    payload_class: agent.AgentTask
+    handler: agent.handle
+    description: "Coding agent"
+    agent:
+      prompt: "safety & coding_base"
+      max_tokens: 8192
+      max_iterations: 10
+      model: haiku
+    peers: [file-read]
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [coding-agent]
+    journal: retain_forever
+"#;
+        let org = parse_organism(yaml).unwrap();
+        let agent = org.get_listener("coding-agent").unwrap();
+        assert!(agent.is_agent);
+
+        let cfg = agent.agent_config.as_ref().unwrap();
+        assert_eq!(cfg.prompt.as_deref(), Some("safety & coding_base"));
+        assert_eq!(cfg.max_tokens, 8192);
+        assert_eq!(cfg.max_iterations, 10);
+        assert_eq!(cfg.model.as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn parse_agent_bool_compat() {
+        let yaml = r#"
+organism:
+  name: test-bool
+
+listeners:
+  - name: coding-agent
+    payload_class: agent.AgentTask
+    handler: agent.handle
+    description: "Coding agent"
+    agent: true
+    peers: [file-read]
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [coding-agent]
+    journal: retain_forever
+"#;
+        let org = parse_organism(yaml).unwrap();
+        let agent = org.get_listener("coding-agent").unwrap();
+        assert!(agent.is_agent);
+
+        // Bool true → default AgentConfig
+        let cfg = agent.agent_config.as_ref().unwrap();
+        assert_eq!(cfg.prompt, None);
+        assert_eq!(cfg.max_tokens, 4096);
+        assert_eq!(cfg.max_iterations, 5);
+        assert_eq!(cfg.model, None);
+    }
+
+    #[test]
+    fn parse_is_agent_alias() {
+        let yaml = r#"
+organism:
+  name: test-alias
+
+listeners:
+  - name: coding-agent
+    payload_class: agent.AgentTask
+    handler: agent.handle
+    description: "Coding agent"
+    is_agent: true
+    peers: [file-read]
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [coding-agent]
+    journal: retain_forever
+"#;
+        let org = parse_organism(yaml).unwrap();
+        let agent = org.get_listener("coding-agent").unwrap();
+        assert!(agent.is_agent);
+        assert!(agent.agent_config.is_some());
+    }
+
+    #[test]
+    fn parse_agent_config_defaults() {
+        let yaml = r#"
+organism:
+  name: test-defaults
+
+listeners:
+  - name: agent
+    payload_class: agent.Task
+    handler: agent.handle
+    description: "Agent"
+    agent:
+      prompt: "my_prompt"
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [agent]
+    journal: retain_forever
+"#;
+        let org = parse_organism(yaml).unwrap();
+        let agent = org.get_listener("agent").unwrap();
+        assert!(agent.is_agent);
+
+        let cfg = agent.agent_config.as_ref().unwrap();
+        assert_eq!(cfg.prompt.as_deref(), Some("my_prompt"));
+        // Defaults
+        assert_eq!(cfg.max_tokens, 4096);
+        assert_eq!(cfg.max_iterations, 5);
+        assert_eq!(cfg.model, None);
+    }
+
+    #[test]
+    fn parse_agent_false_no_config() {
+        let yaml = r#"
+organism:
+  name: test-false
+
+listeners:
+  - name: tool
+    payload_class: tools.Request
+    handler: tools.handle
+    description: "A tool"
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [tool]
+    journal: retain_forever
+"#;
+        let org = parse_organism(yaml).unwrap();
+        let tool = org.get_listener("tool").unwrap();
+        assert!(!tool.is_agent);
+        assert!(tool.agent_config.is_none());
+    }
+
+    #[test]
+    fn parse_file_prompt() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let prompt_path = dir.path().join("test_prompt.md");
+        std::fs::write(&prompt_path, "You are a test prompt from a file.").unwrap();
+
+        // Use forward slashes for YAML compatibility (avoids hex escape issues)
+        let path_str = prompt_path.display().to_string().replace('\\', "/");
+        let yaml = format!(
+            r#"
+organism:
+  name: test-file-prompt
+
+prompts:
+  from_file: "file:{path_str}"
+
+listeners: []
+"#,
+        );
+
+        let org = parse_organism(&yaml).unwrap();
+        assert_eq!(
+            org.get_prompt("from_file"),
+            Some("You are a test prompt from a file.")
+        );
     }
 }

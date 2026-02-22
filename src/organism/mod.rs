@@ -18,6 +18,30 @@ pub struct WasmToolConfig {
     pub capabilities: WasmCapabilities,
 }
 
+/// Agent configuration block on a listener.
+#[derive(Debug, Clone)]
+pub struct AgentConfig {
+    /// Prompt label spec, e.g. "a & b". None = legacy hardcoded prompt.
+    pub prompt: Option<String>,
+    /// Max tokens for LLM completion.
+    pub max_tokens: u32,
+    /// Max agentic loop iterations.
+    pub max_iterations: usize,
+    /// Model override. None = pool default.
+    pub model: Option<String>,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            prompt: None,
+            max_tokens: 4096,
+            max_iterations: 5,
+            model: None,
+        }
+    }
+}
+
 /// Port declaration on a listener (from organism config).
 #[derive(Debug, Clone)]
 pub struct PortDef {
@@ -45,6 +69,8 @@ pub struct ListenerDef {
     /// Rich semantic description for embedding-based routing.
     /// Consumed by the embedding model, never enters the thinker's context.
     pub semantic_description: Option<String>,
+    /// Agent configuration (present when is_agent == true with YAML config block).
+    pub agent_config: Option<AgentConfig>,
 }
 
 /// Result of a hot-reload diff.
@@ -61,6 +87,7 @@ pub struct Organism {
     pub name: String,
     listeners: HashMap<String, ListenerDef>,
     profiles: HashMap<String, SecurityProfile>,
+    prompts: HashMap<String, String>,
 }
 
 impl Organism {
@@ -70,6 +97,7 @@ impl Organism {
             name: name.to_string(),
             listeners: HashMap::new(),
             profiles: HashMap::new(),
+            prompts: HashMap::new(),
         }
     }
 
@@ -136,6 +164,28 @@ impl Organism {
         self.profiles.keys().map(|s| s.as_str()).collect()
     }
 
+    // ── Prompt management ──
+
+    /// Register a named prompt.
+    pub fn register_prompt(&mut self, name: String, content: String) {
+        self.prompts.insert(name, content);
+    }
+
+    /// Get a prompt by name.
+    pub fn get_prompt(&self, name: &str) -> Option<&str> {
+        self.prompts.get(name).map(|s| s.as_str())
+    }
+
+    /// Get all prompts.
+    pub fn prompts(&self) -> &HashMap<String, String> {
+        &self.prompts
+    }
+
+    /// Get all listeners that are agents.
+    pub fn agent_listeners(&self) -> Vec<&ListenerDef> {
+        self.listeners.values().filter(|l| l.is_agent).collect()
+    }
+
     // ── Hot reload ──
 
     /// Apply a new configuration, returning what changed.
@@ -163,8 +213,9 @@ impl Organism {
             self.listeners.insert(name.clone(), def.clone());
         }
 
-        // Replace profiles wholesale
+        // Replace profiles and prompts wholesale
         self.profiles = new.profiles;
+        self.prompts = new.prompts;
         self.name = new.name;
 
         ReloadEvent {
@@ -220,6 +271,7 @@ mod tests {
             librarian: false,
             wasm: None,
             semantic_description: None,
+            agent_config: None,
         }
     }
 
@@ -347,6 +399,7 @@ mod tests {
                 capabilities: WasmCapabilities::default(),
             }),
             semantic_description: None,
+            agent_config: None,
         })
         .unwrap();
 
@@ -375,6 +428,7 @@ mod tests {
                 },
             }),
             semantic_description: None,
+            agent_config: None,
         })
         .unwrap();
 
@@ -401,5 +455,75 @@ mod tests {
             def_with.semantic_description.as_deref(),
             Some("This tool echoes messages back.")
         );
+    }
+
+    // ── YAML-Defined Agents: prompt and agent_config tests ──
+
+    #[test]
+    fn register_and_get_prompt() {
+        let mut org = Organism::new("test");
+        org.register_prompt("greeting".into(), "Hello, world!".into());
+
+        assert_eq!(org.get_prompt("greeting"), Some("Hello, world!"));
+        assert_eq!(org.get_prompt("missing"), None);
+        assert_eq!(org.prompts().len(), 1);
+    }
+
+    #[test]
+    fn agent_listeners_filter() {
+        let mut org = Organism::new("test");
+
+        let mut agent = sample_listener("agent-1");
+        agent.is_agent = true;
+        agent.agent_config = Some(AgentConfig::default());
+        org.register_listener(agent).unwrap();
+
+        org.register_listener(sample_listener("tool-1")).unwrap();
+
+        let agents = org.agent_listeners();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "agent-1");
+    }
+
+    #[test]
+    fn agent_config_on_def() {
+        let mut def = sample_listener("agent");
+        def.is_agent = true;
+        def.agent_config = Some(AgentConfig {
+            prompt: Some("my_prompt".into()),
+            max_tokens: 8192,
+            max_iterations: 10,
+            model: Some("haiku".into()),
+        });
+
+        let cfg = def.agent_config.as_ref().unwrap();
+        assert_eq!(cfg.prompt.as_deref(), Some("my_prompt"));
+        assert_eq!(cfg.max_tokens, 8192);
+        assert_eq!(cfg.max_iterations, 10);
+        assert_eq!(cfg.model.as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn agent_config_default_values() {
+        let cfg = AgentConfig::default();
+        assert_eq!(cfg.prompt, None);
+        assert_eq!(cfg.max_tokens, 4096);
+        assert_eq!(cfg.max_iterations, 5);
+        assert_eq!(cfg.model, None);
+    }
+
+    #[test]
+    fn hot_reload_transfers_prompts() {
+        let mut org = Organism::new("test");
+        org.register_listener(sample_listener("a")).unwrap();
+        org.register_prompt("p1".into(), "hello".into());
+
+        let mut new_org = Organism::new("test-v2");
+        new_org.register_listener(sample_listener("a")).unwrap();
+        new_org.register_prompt("p2".into(), "world".into());
+
+        org.apply_config(new_org);
+        assert_eq!(org.get_prompt("p1"), None); // replaced wholesale
+        assert_eq!(org.get_prompt("p2"), Some("world"));
     }
 }
