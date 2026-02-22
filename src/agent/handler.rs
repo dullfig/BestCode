@@ -33,11 +33,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rust_pipeline::prelude::*;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 
 use crate::librarian::Librarian;
 use crate::llm::types::{ContentBlock, ToolDefinition, ToolResultBlock};
 use crate::llm::LlmPool;
+use crate::pipeline::events::PipelineEvent;
 use crate::routing::{RouteDecision, SemanticRouter};
 
 use super::state::{AgentState, AgentThread, PendingToolCall};
@@ -63,6 +64,8 @@ pub struct CodingAgentHandler {
     semantic_router: Option<SemanticRouter>,
     /// Maximum routing iterations per turn (prevents infinite loops).
     max_routing_iterations: usize,
+    /// Optional event sender for emitting AgentResponse events to the TUI.
+    event_tx: Option<broadcast::Sender<PipelineEvent>>,
 }
 
 /// Default max routing iterations per turn.
@@ -83,6 +86,7 @@ impl CodingAgentHandler {
             system_prompt,
             semantic_router: None,
             max_routing_iterations: DEFAULT_MAX_ROUTING_ITERATIONS,
+            event_tx: None,
         }
     }
 
@@ -101,6 +105,7 @@ impl CodingAgentHandler {
             system_prompt,
             semantic_router: None,
             max_routing_iterations: DEFAULT_MAX_ROUTING_ITERATIONS,
+            event_tx: None,
         }
     }
 
@@ -119,12 +124,43 @@ impl CodingAgentHandler {
             system_prompt,
             semantic_router: Some(router),
             max_routing_iterations: DEFAULT_MAX_ROUTING_ITERATIONS,
+            event_tx: None,
         }
     }
 
     /// Set the maximum routing iterations per turn.
     pub fn set_max_routing_iterations(&mut self, max: usize) {
         self.max_routing_iterations = max;
+    }
+
+    /// Set the event sender for emitting pipeline events (e.g., AgentResponse).
+    pub fn set_event_sender(&mut self, tx: broadcast::Sender<PipelineEvent>) {
+        self.event_tx = Some(tx);
+    }
+
+    /// Emit an AgentResponse event if an event sender is attached.
+    fn maybe_emit_response(&self, thread_id: &str, result: &HandlerResult) {
+        if let Ok(HandlerResponse::Reply { ref payload_xml }) = result {
+            if let Some(ref tx) = self.event_tx {
+                let text = String::from_utf8_lossy(payload_xml);
+                let response_text = extract_tag(&text, "result")
+                    .unwrap_or_else(|| text.to_string());
+                let _ = tx.send(PipelineEvent::AgentResponse {
+                    thread_id: thread_id.to_string(),
+                    text: response_text,
+                });
+            }
+        }
+    }
+
+    /// Emit an error as an AgentResponse event so the TUI can display it.
+    fn emit_error(&self, thread_id: &str, error: &str) {
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.send(PipelineEvent::AgentResponse {
+                thread_id: thread_id.to_string(),
+                text: format!("Error: {error}"),
+            });
+        }
     }
 
     /// Check if a semantic router is attached.
@@ -477,12 +513,17 @@ impl Handler for CodingAgentHandler {
                     thread.push_tool_results(collected);
                     thread.state = AgentState::Ready;
 
-                    let response = self
-                        .call_opus(thread)
-                        .await
-                        .map_err(PipelineError::Handler)?;
+                    let response = match self.call_opus(thread).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            self.emit_error(&thread_id, &e);
+                            return Err(PipelineError::Handler(e));
+                        }
+                    };
                     let action = self.process_response(&response);
-                    self.dispatch_or_route(thread, action, &[]).await
+                    let result = self.dispatch_or_route(thread, action, &[]).await;
+                    self.maybe_emit_response(&thread_id, &result);
+                    result
                 }
                 AgentState::Ready => {
                     // Unexpected tool response when not awaiting
@@ -502,12 +543,17 @@ impl Handler for CodingAgentHandler {
             thread.push_user_message(&task);
             thread.state = AgentState::Ready;
 
-            let response = self
-                .call_opus(thread)
-                .await
-                .map_err(PipelineError::Handler)?;
+            let response = match self.call_opus(thread).await {
+                Ok(r) => r,
+                Err(e) => {
+                    self.emit_error(&thread_id, &e);
+                    return Err(PipelineError::Handler(e));
+                }
+            };
             let action = self.process_response(&response);
-            self.dispatch_or_route(thread, action, &[]).await
+            let result = self.dispatch_or_route(thread, action, &[]).await;
+            self.maybe_emit_response(&thread_id, &result);
+            result
         }
     }
 }
@@ -519,10 +565,19 @@ fn extract_tag(xml: &str, tag: &str) -> Option<String> {
     let start = xml.find(&open)? + open.len();
     let end = xml.find(&close)?;
     if start <= end {
-        Some(xml[start..end].to_string())
+        Some(xml_unescape(&xml[start..end]))
     } else {
         None
     }
+}
+
+/// Unescape XML entities back to plain text.
+fn xml_unescape(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
 }
 
 #[cfg(test)]

@@ -24,4 +24,6 @@ pub enum TuiMessage {
     Render,
     /// Quit the TUI.
     Quit,
+    /// User submitted a task from the input bar.
+    SubmitTask(String),
 }

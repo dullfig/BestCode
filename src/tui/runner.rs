@@ -6,7 +6,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -16,8 +16,11 @@ use ratatui::Terminal;
 use tokio::sync::Mutex;
 use tokio::time::interval;
 
+use rust_pipeline::prelude::build_envelope;
+
 use crate::kernel::Kernel;
 use crate::pipeline::AgentPipeline;
+use crate::tools::xml_escape;
 
 use super::app::{ContextView, MessageView, ThreadView, TuiApp};
 use super::event::TuiMessage;
@@ -46,6 +49,26 @@ pub async fn refresh_from_kernel(app: &mut TuiApp, kernel: &Arc<Mutex<Kernel>>) 
     // Lock released here — microseconds
 }
 
+/// Inject a task from the input bar into the pipeline.
+async fn inject_task(pipeline: &AgentPipeline, kernel: &Arc<Mutex<Kernel>>, task: &str) {
+    let root_uuid = {
+        let k = kernel.lock().await;
+        k.threads().root_uuid().map(|s| s.to_string())
+    };
+
+    if let Some(uuid) = root_uuid {
+        let escaped = xml_escape(task);
+        let xml = format!("<AgentTask><task>{escaped}</task></AgentTask>");
+        if let Ok(envelope) =
+            build_envelope("user", "coding-agent", &uuid, xml.as_bytes())
+        {
+            let _ = pipeline
+                .inject_checked(envelope, &uuid, "coding", "coding-agent")
+                .await;
+        }
+    }
+}
+
 /// Run the TUI main loop. Blocks until quit.
 pub async fn run_tui(pipeline: &AgentPipeline) -> anyhow::Result<()> {
     // Setup terminal
@@ -58,6 +81,22 @@ pub async fn run_tui(pipeline: &AgentPipeline) -> anyhow::Result<()> {
     let kernel = pipeline.kernel();
     let mut event_rx = pipeline.subscribe();
 
+    // Dedicated input thread — reads crossterm events and sends through channel.
+    // One thread, no polling/spinning. event::read() blocks until input arrives.
+    let (key_tx, mut key_rx) = tokio::sync::mpsc::channel::<Event>(32);
+    tokio::task::spawn_blocking(move || {
+        loop {
+            match event::read() {
+                Ok(ev) => {
+                    if key_tx.blocking_send(ev).is_err() {
+                        break; // receiver dropped, TUI is shutting down
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
     let mut tick_interval = interval(Duration::from_millis(250)); // 4Hz
     let mut render_interval = interval(Duration::from_millis(33)); // ~30fps
 
@@ -67,23 +106,23 @@ pub async fn run_tui(pipeline: &AgentPipeline) -> anyhow::Result<()> {
                 refresh_from_kernel(&mut app, &kernel).await;
             }
             _ = render_interval.tick() => {
-                terminal.draw(|f| layout::draw(f, &app))?;
+                terminal.draw(|f| layout::draw(f, &mut app))?;
             }
-            Ok(event) = event_rx.recv() => {
-                app.update(TuiMessage::Pipeline(event));
+            Ok(pipeline_event) = event_rx.recv() => {
+                app.update(TuiMessage::Pipeline(pipeline_event));
             }
-            // Poll crossterm events (non-blocking via tokio::task::spawn_blocking)
-            result = tokio::task::spawn_blocking(|| {
-                if event::poll(Duration::from_millis(10)).unwrap_or(false) {
-                    event::read().ok()
-                } else {
-                    None
-                }
-            }) => {
-                if let Ok(Some(Event::Key(key))) = result {
-                    app.update(TuiMessage::Input(key));
+            Some(crossterm_event) = key_rx.recv() => {
+                if let Event::Key(key) = crossterm_event {
+                    if key.kind == KeyEventKind::Press {
+                        app.update(TuiMessage::Input(key));
+                    }
                 }
             }
+        }
+
+        // Check for pending task submission (set by input handler on Enter)
+        if let Some(task) = app.pending_task.take() {
+            inject_task(pipeline, &kernel, &task).await;
         }
 
         if app.should_quit {
@@ -234,5 +273,104 @@ profiles:
         // but threads should be accessible
 
         pipeline.shutdown().await;
+    }
+
+    #[test]
+    fn submit_sets_pending_task() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = TuiApp::new();
+        app.input_text = "Read README.md".into();
+
+        app.update(TuiMessage::Input(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(app.pending_task, Some("Read README.md".into()));
+        assert!(app.input_text.is_empty());
+        assert_eq!(app.chat_log.len(), 1);
+        assert_eq!(app.chat_log[0].role, "user");
+    }
+
+    #[test]
+    fn typing_goes_to_input() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = TuiApp::new();
+
+        // Type "hi" — no 'i' key needed, just type
+        app.update(TuiMessage::Input(KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::NONE,
+        )));
+        app.update(TuiMessage::Input(KeyEvent::new(
+            KeyCode::Char('i'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.input_text, "hi");
+
+        // Backspace
+        app.update(TuiMessage::Input(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.input_text, "h");
+    }
+
+    #[test]
+    fn esc_clears_input() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = TuiApp::new();
+        app.input_text = "some text".into();
+
+        app.update(TuiMessage::Input(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+
+        assert!(app.input_text.is_empty());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn arrows_scroll_messages() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = TuiApp::new();
+        app.message_scroll = 5;
+        app.message_auto_scroll = false;
+
+        app.update(TuiMessage::Input(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.message_scroll, 4);
+
+        app.update(TuiMessage::Input(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.message_scroll, 5);
+    }
+
+    #[test]
+    fn agent_response_updates_status() {
+        use super::super::app::AgentStatus;
+
+        let mut app = TuiApp::new();
+        app.agent_status = AgentStatus::Thinking;
+
+        app.update(TuiMessage::Pipeline(PipelineEvent::AgentResponse {
+            thread_id: "t1".into(),
+            text: "Done! Here is the summary.".into(),
+        }));
+
+        assert_eq!(app.agent_status, AgentStatus::Idle);
+        assert_eq!(
+            app.last_response,
+            Some("Done! Here is the summary.".into())
+        );
     }
 }

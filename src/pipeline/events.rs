@@ -41,6 +41,11 @@ pub enum PipelineEvent {
         model: String,
         success: bool,
     },
+    /// Coding agent produced a final response.
+    AgentResponse {
+        thread_id: String,
+        text: String,
+    },
 }
 
 /// Kernel operation types for event reporting.

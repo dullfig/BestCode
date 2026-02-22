@@ -224,16 +224,19 @@ pub struct AgentPipelineBuilder {
     registry: ListenerRegistry,
     llm_pool: Option<Arc<Mutex<LlmPool>>>,
     port_manager: Option<PortManager>,
-    librarian: Option<Arc<Mutex<Librarian>>>,
-    code_index: Option<Arc<Mutex<CodeIndex>>>,
+    pub librarian: Option<Arc<Mutex<Librarian>>>,
+    pub code_index: Option<Arc<Mutex<CodeIndex>>>,
     wasm_runtime: Option<Arc<WasmRuntime>>,
     wasm_registry: Option<WasmToolRegistry>,
     semantic_router: Option<SemanticRouter>,
+    /// Event channel created early so handlers can emit events.
+    event_tx: broadcast::Sender<PipelineEvent>,
 }
 
 impl AgentPipelineBuilder {
     /// Start building an AgentPipeline.
     pub fn new(organism: Organism, data_dir: &Path) -> Self {
+        let (event_tx, _) = broadcast::channel(256);
         Self {
             organism,
             data_dir: data_dir.to_path_buf(),
@@ -245,6 +248,7 @@ impl AgentPipelineBuilder {
             wasm_runtime: None,
             wasm_registry: None,
             semantic_router: None,
+            event_tx,
         }
     }
 
@@ -533,7 +537,7 @@ impl AgentPipelineBuilder {
         let system_prompt = prompts::build_system_prompt(&tool_descs);
 
         // Create the handler
-        let handler = if let Some(router) = self.semantic_router.take() {
+        let mut handler = if let Some(router) = self.semantic_router.take() {
             let h = CodingAgentHandler::with_semantic_router(
                 pool,
                 router,
@@ -559,7 +563,22 @@ impl AgentPipelineBuilder {
             CodingAgentHandler::new(pool, tool_definitions, system_prompt)
         };
 
+        // Wire the event sender so the handler can emit AgentResponse events
+        handler.set_event_sender(self.event_tx.clone());
+
         self = self.register("coding-agent", handler)?;
+
+        // Register additional route so tool responses (ToolResponse payload tag)
+        // can route back to coding-agent. Without this, the pipeline only knows
+        // coding-agent.agenttask and drops tool replies silently.
+        self.registry.routing.register(
+            "coding-agent",
+            "ToolResponse",
+            def.is_agent,
+            def.peers.clone(),
+            &def.description,
+        );
+
         Ok(self)
     }
 
@@ -572,14 +591,13 @@ impl AgentPipelineBuilder {
 
         let threads = ThreadRegistry::new();
         let pipeline = Pipeline::new(self.registry, threads);
-        let (event_tx, _) = broadcast::channel(256);
 
         Ok(AgentPipeline {
             pipeline,
             kernel: Arc::new(Mutex::new(kernel)),
             organism: self.organism,
             security,
-            event_tx,
+            event_tx: self.event_tx,
         })
     }
 }

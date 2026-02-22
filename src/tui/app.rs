@@ -16,17 +16,29 @@ pub enum FocusedPane {
     Threads,
     Messages,
     Context,
+    /// Text input bar at the bottom.
+    Input,
 }
 
 impl FocusedPane {
-    /// Cycle to the next pane.
+    /// Cycle to the next pane (Tab key). Skips Input — use 'i' to enter input mode.
     pub fn next(self) -> Self {
         match self {
             Self::Threads => Self::Messages,
             Self::Messages => Self::Context,
             Self::Context => Self::Threads,
+            Self::Input => Self::Threads,
         }
     }
+}
+
+/// Agent processing status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentStatus {
+    Idle,
+    Thinking,
+    ToolCall(String),
+    Error(String),
 }
 
 /// Lightweight view of a thread record (no kernel lifetime).
@@ -120,6 +132,15 @@ impl From<&ContextInventory> for ContextView {
     }
 }
 
+/// A chat message in the conversation log.
+#[derive(Debug, Clone)]
+pub struct ChatEntry {
+    /// "user" or "agent"
+    pub role: String,
+    /// The message text.
+    pub text: String,
+}
+
 /// The main TUI application state (TEA model).
 pub struct TuiApp {
     /// Which pane has keyboard focus.
@@ -130,6 +151,8 @@ pub struct TuiApp {
     pub selected_thread: usize,
     /// Scroll offset for the messages pane.
     pub message_scroll: u16,
+    /// When true, auto-scroll messages to bottom on next render.
+    pub message_auto_scroll: bool,
     /// Recent pipeline events (ring buffer).
     pub event_log: Vec<PipelineEvent>,
     /// Thread list (refreshed from kernel on tick).
@@ -142,6 +165,16 @@ pub struct TuiApp {
     pub total_input_tokens: u64,
     /// Total output tokens across all API calls.
     pub total_output_tokens: u64,
+    /// Text being typed in the input bar.
+    pub input_text: String,
+    /// Current agent processing status.
+    pub agent_status: AgentStatus,
+    /// Task pending injection into the pipeline (set by input, consumed by runner).
+    pub pending_task: Option<String>,
+    /// Last agent response text (for display).
+    pub last_response: Option<String>,
+    /// Conversation log (user tasks + agent responses).
+    pub chat_log: Vec<ChatEntry>,
 }
 
 /// Maximum number of events in the ring buffer.
@@ -151,16 +184,22 @@ impl TuiApp {
     /// Create a new TuiApp with default state.
     pub fn new() -> Self {
         Self {
-            focus: FocusedPane::Threads,
+            focus: FocusedPane::Input,
             should_quit: false,
             selected_thread: 0,
             message_scroll: 0,
+            message_auto_scroll: true,
             event_log: Vec::new(),
             threads: Vec::new(),
             messages: Vec::new(),
             context: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            input_text: String::new(),
+            agent_status: AgentStatus::Idle,
+            pending_task: None,
+            last_response: None,
+            chat_log: Vec::new(),
         }
     }
 
@@ -182,19 +221,44 @@ impl TuiApp {
             TuiMessage::Quit => {
                 self.should_quit = true;
             }
+            TuiMessage::SubmitTask(_) => {
+                // Handled by runner (task injection into pipeline)
+            }
         }
     }
 
     /// Handle a pipeline event.
     fn handle_pipeline_event(&mut self, event: PipelineEvent) {
-        if let PipelineEvent::TokenUsage {
-            input_tokens,
-            output_tokens,
-            ..
-        } = &event
-        {
-            self.total_input_tokens += *input_tokens as u64;
-            self.total_output_tokens += *output_tokens as u64;
+        match &event {
+            PipelineEvent::TokenUsage {
+                input_tokens,
+                output_tokens,
+                ..
+            } => {
+                self.total_input_tokens += *input_tokens as u64;
+                self.total_output_tokens += *output_tokens as u64;
+            }
+            PipelineEvent::AgentResponse { text, .. } => {
+                if text.starts_with("Error: ") {
+                    self.agent_status = AgentStatus::Error(text.clone());
+                } else {
+                    self.agent_status = AgentStatus::Idle;
+                }
+                self.last_response = Some(text.clone());
+                self.chat_log.push(ChatEntry {
+                    role: "agent".into(),
+                    text: text.clone(),
+                });
+                // Auto-scroll to bottom so latest response is visible
+                self.message_auto_scroll = true;
+            }
+            PipelineEvent::MessageInjected { target, .. } => {
+                // Track tool calls from the coding agent
+                if target != "coding-agent" && self.agent_status == AgentStatus::Thinking {
+                    self.agent_status = AgentStatus::ToolCall(target.clone());
+                }
+            }
+            _ => {}
         }
 
         self.event_log.push(event);
@@ -221,6 +285,18 @@ impl TuiApp {
             self.selected_thread += 1;
         }
     }
+
+    /// Scroll messages pane down.
+    pub fn scroll_messages_down(&mut self) {
+        self.message_auto_scroll = false;
+        self.message_scroll = self.message_scroll.saturating_add(1);
+    }
+
+    /// Scroll messages pane up.
+    pub fn scroll_messages_up(&mut self) {
+        self.message_auto_scroll = false;
+        self.message_scroll = self.message_scroll.saturating_sub(1);
+    }
 }
 
 impl Default for TuiApp {
@@ -240,35 +316,9 @@ mod tests {
     #[test]
     fn app_default_state() {
         let app = TuiApp::new();
-        assert_eq!(app.focus, FocusedPane::Threads);
+        assert_eq!(app.focus, FocusedPane::Input);
         assert!(!app.should_quit);
         assert_eq!(app.selected_thread, 0);
-    }
-
-    #[test]
-    fn app_cycle_focus() {
-        let mut app = TuiApp::new();
-        assert_eq!(app.focus, FocusedPane::Threads);
-
-        let tab = TuiMessage::Input(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        app.update(tab.clone());
-        assert_eq!(app.focus, FocusedPane::Messages);
-
-        app.update(tab.clone());
-        assert_eq!(app.focus, FocusedPane::Context);
-
-        app.update(tab);
-        assert_eq!(app.focus, FocusedPane::Threads);
-    }
-
-    #[test]
-    fn app_quit_on_q() {
-        let mut app = TuiApp::new();
-        app.update(TuiMessage::Input(KeyEvent::new(
-            KeyCode::Char('q'),
-            KeyModifiers::NONE,
-        )));
-        assert!(app.should_quit);
     }
 
     #[test]
@@ -282,8 +332,21 @@ mod tests {
     }
 
     #[test]
+    fn app_typing_goes_to_input() {
+        let mut app = TuiApp::new();
+        app.update(TuiMessage::Input(KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::NONE,
+        )));
+        // 'q' types into input, doesn't quit
+        assert!(!app.should_quit);
+        assert_eq!(app.input_text, "q");
+    }
+
+    #[test]
     fn app_move_up_down() {
         let mut app = TuiApp::new();
+        // Direct method calls since j/k now type into input
         app.threads = vec![
             ThreadView {
                 uuid: "a".into(),
@@ -299,46 +362,29 @@ mod tests {
             },
         ];
 
-        app.update(TuiMessage::Input(KeyEvent::new(
-            KeyCode::Char('j'),
-            KeyModifiers::NONE,
-        )));
+        app.move_down();
         assert_eq!(app.selected_thread, 1);
 
-        app.update(TuiMessage::Input(KeyEvent::new(
-            KeyCode::Char('k'),
-            KeyModifiers::NONE,
-        )));
+        app.move_up();
         assert_eq!(app.selected_thread, 0);
     }
 
     #[test]
     fn app_move_clamped() {
         let mut app = TuiApp::new();
-        // No threads — moving shouldn't panic or underflow
-        app.update(TuiMessage::Input(KeyEvent::new(
-            KeyCode::Char('k'),
-            KeyModifiers::NONE,
-        )));
+        app.move_up();
         assert_eq!(app.selected_thread, 0);
 
-        app.update(TuiMessage::Input(KeyEvent::new(
-            KeyCode::Char('j'),
-            KeyModifiers::NONE,
-        )));
+        app.move_down();
         assert_eq!(app.selected_thread, 0);
 
-        // One thread — can't go past it
         app.threads = vec![ThreadView {
             uuid: "a".into(),
             chain: "c".into(),
             profile: "p".into(),
             created_at: 0,
         }];
-        app.update(TuiMessage::Input(KeyEvent::new(
-            KeyCode::Char('j'),
-            KeyModifiers::NONE,
-        )));
+        app.move_down();
         assert_eq!(app.selected_thread, 0);
     }
 
@@ -354,6 +400,7 @@ mod tests {
         let _tick = TuiMessage::Tick;
         let _render = TuiMessage::Render;
         let _quit = TuiMessage::Quit;
+        let _submit = TuiMessage::SubmitTask("hello".into());
     }
 
     #[test]
