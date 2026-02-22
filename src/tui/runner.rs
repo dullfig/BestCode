@@ -70,7 +70,7 @@ async fn inject_task(pipeline: &AgentPipeline, kernel: &Arc<Mutex<Kernel>>, task
 }
 
 /// Run the TUI main loop. Blocks until quit.
-pub async fn run_tui(pipeline: &AgentPipeline) -> anyhow::Result<()> {
+pub async fn run_tui(pipeline: &AgentPipeline, debug: bool) -> anyhow::Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
@@ -78,16 +78,30 @@ pub async fn run_tui(pipeline: &AgentPipeline) -> anyhow::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = TuiApp::new();
+    app.debug_mode = debug;
+    app.llm_pool = pipeline.llm_pool();
     let kernel = pipeline.kernel();
     let mut event_rx = pipeline.subscribe();
 
     // Dedicated input thread — reads crossterm events and sends through channel.
     // One thread, no polling/spinning. event::read() blocks until input arrives.
+    // CRITICAL: Filter on the input thread side. Windows fires Press, Repeat, and
+    // Release for every keystroke. If we send all events through the channel, Release
+    // events accumulate, burn select iterations, and starve the render branch.
     let (key_tx, mut key_rx) = tokio::sync::mpsc::channel::<Event>(32);
     tokio::task::spawn_blocking(move || {
         loop {
             match event::read() {
                 Ok(ev) => {
+                    // Only forward Press events — drop Release/Repeat before they
+                    // enter the channel. Non-key events (mouse, resize) pass through.
+                    let dominated = matches!(
+                        &ev,
+                        Event::Key(k) if k.kind != KeyEventKind::Press
+                    );
+                    if dominated {
+                        continue;
+                    }
                     if key_tx.blocking_send(ev).is_err() {
                         break; // receiver dropped, TUI is shutting down
                     }
@@ -98,7 +112,9 @@ pub async fn run_tui(pipeline: &AgentPipeline) -> anyhow::Result<()> {
     });
 
     let mut tick_interval = interval(Duration::from_millis(250)); // 4Hz
+    tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut render_interval = interval(Duration::from_millis(33)); // ~30fps
+    render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -112,11 +128,19 @@ pub async fn run_tui(pipeline: &AgentPipeline) -> anyhow::Result<()> {
                 app.update(TuiMessage::Pipeline(pipeline_event));
             }
             Some(crossterm_event) = key_rx.recv() => {
+                // Input thread already filters to Press-only key events.
                 if let Event::Key(key) = crossterm_event {
-                    if key.kind == KeyEventKind::Press {
-                        app.update(TuiMessage::Input(key));
-                    }
+                    app.update(TuiMessage::Input(key));
                 }
+            }
+        }
+
+        // Check for pending slash command (set by input handler on Enter with `/`)
+        if let Some(cmd) = app.pending_command.take() {
+            let pool_ref = app.llm_pool.clone();
+            let result = super::commands::execute(&mut app, &cmd, pool_ref.as_ref()).await;
+            if let Some(feedback) = result.feedback {
+                super::commands::push_feedback(&mut app, &feedback);
             }
         }
 
@@ -280,7 +304,12 @@ profiles:
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut app = TuiApp::new();
-        app.input_text = "Read README.md".into();
+        // Type "Read README.md" into textarea
+        for c in "Read README.md".chars() {
+            app.input_textarea.input(crossterm::event::Event::Key(
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            ));
+        }
 
         app.update(TuiMessage::Input(KeyEvent::new(
             KeyCode::Enter,
@@ -288,18 +317,18 @@ profiles:
         )));
 
         assert_eq!(app.pending_task, Some("Read README.md".into()));
-        assert!(app.input_text.is_empty());
+        assert_eq!(app.input_textarea.lines(), [""]);
         assert_eq!(app.chat_log.len(), 1);
         assert_eq!(app.chat_log[0].role, "user");
     }
 
     #[test]
-    fn typing_goes_to_input() {
+    fn typing_goes_to_textarea() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut app = TuiApp::new();
 
-        // Type "hi" — no 'i' key needed, just type
+        // Type "hi" — goes directly to textarea
         app.update(TuiMessage::Input(KeyEvent::new(
             KeyCode::Char('h'),
             KeyModifiers::NONE,
@@ -308,29 +337,34 @@ profiles:
             KeyCode::Char('i'),
             KeyModifiers::NONE,
         )));
-        assert_eq!(app.input_text, "hi");
+        assert_eq!(app.input_textarea.lines(), ["hi"]);
 
         // Backspace
         app.update(TuiMessage::Input(KeyEvent::new(
             KeyCode::Backspace,
             KeyModifiers::NONE,
         )));
-        assert_eq!(app.input_text, "h");
+        assert_eq!(app.input_textarea.lines(), ["h"]);
     }
 
     #[test]
-    fn esc_clears_input() {
+    fn esc_clears_textarea() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut app = TuiApp::new();
-        app.input_text = "some text".into();
+        // Type some text into textarea
+        for c in "some text".chars() {
+            app.input_textarea.input(crossterm::event::Event::Key(
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            ));
+        }
 
         app.update(TuiMessage::Input(KeyEvent::new(
             KeyCode::Esc,
             KeyModifiers::NONE,
         )));
 
-        assert!(app.input_text.is_empty());
+        assert_eq!(app.input_textarea.lines(), [""]);
         assert!(!app.should_quit);
     }
 
@@ -339,20 +373,22 @@ profiles:
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut app = TuiApp::new();
-        app.message_scroll = 5;
+        app.message_scroll = 10;
         app.message_auto_scroll = false;
 
+        // Up scrolls 3 lines at a time
         app.update(TuiMessage::Input(KeyEvent::new(
             KeyCode::Up,
             KeyModifiers::NONE,
         )));
-        assert_eq!(app.message_scroll, 4);
+        assert_eq!(app.message_scroll, 7);
 
+        // Down scrolls 3 lines at a time
         app.update(TuiMessage::Input(KeyEvent::new(
             KeyCode::Down,
             KeyModifiers::NONE,
         )));
-        assert_eq!(app.message_scroll, 5);
+        assert_eq!(app.message_scroll, 10);
     }
 
     #[test]
@@ -372,5 +408,109 @@ profiles:
             app.last_response,
             Some("Done! Here is the summary.".into())
         );
+    }
+
+    #[test]
+    fn ctrl_keys_switch_tabs() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use super::super::app::ActiveTab;
+
+        let mut app = TuiApp::new();
+        assert_eq!(app.active_tab, ActiveTab::Messages);
+
+        // Ctrl+2 → Threads
+        app.update(TuiMessage::Input(KeyEvent::new(
+            KeyCode::Char('2'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.active_tab, ActiveTab::Threads);
+
+        // Ctrl+3 → Yaml
+        app.update(TuiMessage::Input(KeyEvent::new(
+            KeyCode::Char('3'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.active_tab, ActiveTab::Yaml);
+
+        // Ctrl+4 → Wasm
+        app.update(TuiMessage::Input(KeyEvent::new(
+            KeyCode::Char('4'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.active_tab, ActiveTab::Wasm);
+
+        // Ctrl+1 → Messages
+        app.update(TuiMessage::Input(KeyEvent::new(
+            KeyCode::Char('1'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.active_tab, ActiveTab::Messages);
+    }
+
+    #[test]
+    fn home_jumps_to_top() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = TuiApp::new();
+        app.message_scroll = 50;
+        app.message_auto_scroll = false;
+
+        app.update(TuiMessage::Input(KeyEvent::new(
+            KeyCode::Home,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.message_scroll, 0);
+        assert!(!app.message_auto_scroll);
+    }
+
+    #[test]
+    fn end_jumps_to_bottom() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = TuiApp::new();
+        app.message_scroll = 0;
+        app.message_auto_scroll = false;
+
+        app.update(TuiMessage::Input(KeyEvent::new(
+            KeyCode::End,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.message_auto_scroll);
+    }
+
+    #[test]
+    fn page_up_scrolls_by_viewport() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = TuiApp::new();
+        app.message_scroll = 50;
+        app.message_auto_scroll = false;
+        app.viewport_height = 20;
+
+        app.update(TuiMessage::Input(KeyEvent::new(
+            KeyCode::PageUp,
+            KeyModifiers::NONE,
+        )));
+        // viewport_height(20) - 2 overlap = 18 lines scrolled
+        assert_eq!(app.message_scroll, 32);
+    }
+
+    #[test]
+    fn arrows_dont_scroll_messages_on_threads_tab() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = TuiApp::new();
+        app.message_scroll = 5;
+        app.message_auto_scroll = false;
+
+        // Switch to Threads tab (default focus = ThreadList)
+        app.active_tab = super::super::app::ActiveTab::Threads;
+
+        // Up arrow should NOT scroll messages — dispatches to thread list instead
+        app.update(TuiMessage::Input(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.message_scroll, 5); // unchanged
     }
 }

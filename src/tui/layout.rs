@@ -1,17 +1,15 @@
-//! Three-pane layout with input bar for the TUI.
+//! Tabbed layout with TextArea input bar.
 //!
 //! ```text
-//! ┌────────────┬──────────────────────────┐
-//! │  Threads   │     Messages             │
-//! │  (25%)     │     (Fill)               │
-//! │            ├──────────────────────────┤
-//! │            │     Context (40%)        │
-//! │            │     (foldable tree)      │
-//! ├────────────┴──────────────────────────┤
-//! │ > Type a task and press Enter...       │
-//! ├────────────────────────────────────────┤
-//! │ [Status: idle] [Tokens: 12K/3K] [i:Input Tab:Focus q:Quit] │
-//! └────────────────────────────────────────┘
+//! ┌─[ Messages ]──[ Threads ]──[ YAML ]──[ WASM ]─┐
+//! │                                                 │
+//! │  (full-screen content for the active tab)       │
+//! │                                                 │
+//! ├─────────────────────────────────────────────────┤
+//! │ > input bar (tui-textarea)                      │
+//! ├─────────────────────────────────────────────────┤
+//! │ [idle] [Tokens: 12K/3K] ^1/2/3/4:Tabs          │
+//! └─────────────────────────────────────────────────┘
 //! ```
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -23,7 +21,8 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use super::app::{AgentStatus, FocusedPane, TuiApp};
+use super::app::{ActiveTab, AgentStatus, ThreadsFocus, TuiApp};
+use super::context_tree;
 use super::dashboard;
 
 /// Draw the full TUI layout.
@@ -31,86 +30,276 @@ pub fn draw(f: &mut Frame, app: &mut TuiApp) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(5),     // main area
-            Constraint::Length(3),  // input bar
-            Constraint::Length(1),  // status bar
+            Constraint::Length(1), // tab bar
+            Constraint::Min(5),   // content area
+            Constraint::Length(3), // input (textarea)
+            Constraint::Length(1), // status bar
         ])
         .split(f.area());
 
-    let main_area = outer[0];
-    let input_area = outer[1];
-    let status_area = outer[2];
+    draw_tab_bar(f, app, outer[0]);
 
-    // Main: left (threads) + right (messages/context)
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
-        .split(main_area);
+    match app.active_tab {
+        ActiveTab::Messages => draw_messages(f, app, outer[1]),
+        ActiveTab::Threads => draw_threads(f, app, outer[1]),
+        ActiveTab::Yaml => draw_yaml_placeholder(f, outer[1]),
+        ActiveTab::Wasm => draw_wasm_placeholder(f, outer[1]),
+        ActiveTab::Debug => draw_debug(f, app, outer[1]),
+    }
 
-    let left = columns[0];
-    let right = columns[1];
-
-    // Right: messages (top 60%) + context (bottom 40%)
-    let right_split = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(right);
-
-    let messages_area = right_split[0];
-    let context_area = right_split[1];
-
-    draw_threads(f, app, left);
-    draw_messages(f, app, messages_area);
-    draw_context(f, app, context_area);
-    draw_input(f, app, input_area);
-    draw_status(f, app, status_area);
+    f.render_widget(&app.input_textarea, outer[2]);
+    draw_ghost_text(f, app, outer[2]);
+    draw_status(f, app, outer[3]);
 }
 
-fn border_style(focused: bool) -> Style {
-    if focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
+/// Render ghost-text autocomplete overlay after the cursor in the input bar.
+fn draw_ghost_text(f: &mut Frame, app: &TuiApp, area: Rect) {
+    let input = app.input_textarea.lines().first().cloned().unwrap_or_default();
+    if let Some(suffix) = super::commands::ghost_suffix(&input) {
+        let (row, col) = app.input_textarea.cursor();
+        // +1 for left border on both axes
+        let x = area.x + col as u16 + 1;
+        let y = area.y + row as u16 + 1;
+        let max_width = area.right().saturating_sub(x);
+        if max_width > 0 {
+            let ghost = Paragraph::new(Span::styled(
+                &suffix[..suffix.len().min(max_width as usize)],
+                Style::default().fg(Color::DarkGray),
+            ));
+            let ghost_rect = Rect::new(x, y, max_width.min(suffix.len() as u16), 1);
+            f.render_widget(ghost, ghost_rect);
+        }
     }
 }
 
-fn draw_threads(f: &mut Frame, app: &TuiApp, area: Rect) {
-    let focused = app.focus == FocusedPane::Threads;
-    let block = Block::default()
+fn draw_tab_bar(f: &mut Frame, app: &TuiApp, area: Rect) {
+    let mut tabs: Vec<(&str, ActiveTab, &str)> = vec![
+        ("Messages", ActiveTab::Messages, "1"),
+        ("Threads", ActiveTab::Threads, "2"),
+        ("YAML", ActiveTab::Yaml, "3"),
+        ("WASM", ActiveTab::Wasm, "4"),
+    ];
+    if app.debug_mode {
+        tabs.push(("Debug", ActiveTab::Debug, "5"));
+    }
+
+    let spans: Vec<Span> = tabs
+        .iter()
+        .flat_map(|(name, tab, num)| {
+            let is_active = *tab == app.active_tab;
+            let style = if is_active {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            vec![
+                Span::raw(" "),
+                Span::styled(format!("[^{num} {name}]"), style),
+            ]
+        })
+        .collect();
+
+    let line = Line::from(spans);
+    let para = Paragraph::new(line);
+    f.render_widget(para, area);
+}
+
+fn draw_threads(f: &mut Frame, app: &mut TuiApp, area: Rect) {
+    // Two-pane vertical split: threads list, context tree
+    let thread_rows = (app.threads.len() as u16 + 2).min(7).max(3);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(thread_rows), // threads
+            Constraint::Min(5),             // context tree (gets all remaining space)
+        ])
+        .split(area);
+
+    // ── Pane 1: Thread list ──
+    let thread_border_color = if app.threads_focus == ThreadsFocus::ThreadList {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+    let thread_block = Block::default()
         .title(" Threads ")
         .borders(Borders::ALL)
-        .border_style(border_style(focused));
+        .border_style(Style::default().fg(thread_border_color));
 
-    let items: Vec<ListItem> = app
+    let thread_items: Vec<ListItem> = app
         .threads
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let style = if i == app.selected_thread {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
+            let chain_short = t.chain.split('.').next_back().unwrap_or(&t.chain);
+            let is_selected = i == app.selected_thread;
+            let style = if is_selected {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
             } else {
-                Style::default()
+                Style::default().fg(Color::DarkGray)
             };
-            let chain_short = t.chain.split('.').last().unwrap_or(&t.chain);
+            let prefix = if is_selected { "> " } else { "  " };
             ListItem::new(Line::from(vec![
+                Span::styled(prefix, style),
                 Span::styled(chain_short, style),
-                Span::styled(format!(" [{}]", t.profile), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!(" [{}]", t.profile), style),
+                Span::styled(
+                    format!("  {}", &t.uuid[..8.min(t.uuid.len())]),
+                    style,
+                ),
             ]))
         })
         .collect();
 
-    let list = List::new(items).block(block);
-    f.render_widget(list, area);
+    let thread_list = List::new(thread_items).block(thread_block);
+    f.render_widget(thread_list, chunks[0]);
+
+    // ── Pane 2: Context tree (tui-tree-widget) ──
+    let ctx_border_color = if app.threads_focus == ThreadsFocus::ContextTree {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+
+    let selected_uuid = app
+        .threads
+        .get(app.selected_thread)
+        .map(|t| &t.uuid[..8.min(t.uuid.len())])
+        .unwrap_or("?");
+    let ctx_title = format!(" Context (thread {selected_uuid}) ");
+
+    let ctx_block = Block::default()
+        .title(ctx_title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ctx_border_color));
+
+    if let Some(ctx) = &app.context {
+        let items = context_tree::build_context_tree(ctx);
+        if let Ok(tree) = tui_tree_widget::Tree::new(&items) {
+            let tree = tree
+                .block(ctx_block)
+                .highlight_style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .highlight_symbol(">> ");
+            f.render_stateful_widget(tree, chunks[1], &mut app.context_tree_state);
+        } else {
+            let para = Paragraph::new("Error building context tree").block(ctx_block);
+            f.render_widget(para, chunks[1]);
+        }
+    } else {
+        let para = Paragraph::new(Span::styled(
+            "No context for selected thread.",
+            Style::default().fg(Color::DarkGray),
+        ))
+        .block(ctx_block);
+        f.render_widget(para, chunks[1]);
+    }
+
+}
+
+fn draw_debug(f: &mut Frame, app: &mut TuiApp, area: Rect) {
+    let block = Block::default()
+        .title(" Debug — Activity Trace ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let lines: Vec<Line> = if app.activity_log.is_empty() {
+        vec![Line::from(Span::styled(
+            "No activity yet. Submit a task to see the live trace.",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    } else {
+        app.activity_log
+            .iter()
+            .map(|entry| {
+                let time_str = format_timestamp(entry.timestamp);
+                let status_span = match entry.status {
+                    super::app::ActivityStatus::InProgress => {
+                        Span::styled("...", Style::default().fg(Color::Yellow))
+                    }
+                    super::app::ActivityStatus::Done => {
+                        Span::styled(" OK", Style::default().fg(Color::Green))
+                    }
+                    super::app::ActivityStatus::Error => {
+                        Span::styled("ERR", Style::default().fg(Color::Red))
+                    }
+                };
+                let detail_text = if entry.detail.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}", entry.detail)
+                };
+                Line::from(vec![
+                    Span::styled(
+                        format!("{time_str}  "),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("[{}]", entry.label),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(detail_text),
+                    Span::raw("  "),
+                    status_span,
+                ])
+            })
+            .collect()
+    };
+
+    // Scroll clamping (same pattern as draw_messages)
+    let inner_height = area.height.saturating_sub(2) as u32;
+    let total_lines = lines.len() as u32;
+    let max_scroll = total_lines.saturating_sub(inner_height);
+    let max_scroll_u16 = max_scroll.min(u16::MAX as u32) as u16;
+    let scroll = if app.activity_auto_scroll {
+        max_scroll_u16
+    } else {
+        app.activity_scroll.min(max_scroll_u16)
+    };
+    app.activity_scroll = scroll;
+    app.activity_viewport_height = inner_height.min(u16::MAX as u32) as u16;
+
+    let para = Paragraph::new(lines)
+        .block(block)
+        .scroll((scroll, 0));
+    f.render_widget(para, area);
+
+    // Scrollbar
+    if total_lines > inner_height {
+        let mut scrollbar_state =
+            ScrollbarState::new(max_scroll_u16 as usize).position(scroll as usize);
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None),
+            area,
+            &mut scrollbar_state,
+        );
+    }
+}
+
+/// Format a unix timestamp as HH:MM:SS local time.
+fn format_timestamp(secs: u64) -> String {
+    // Simple: seconds since midnight (avoids chrono dependency)
+    let total_secs = secs % 86400;
+    let h = total_secs / 3600;
+    let m = (total_secs % 3600) / 60;
+    let s = total_secs % 60;
+    format!("{h:02}:{m:02}:{s:02}")
 }
 
 fn draw_messages(f: &mut Frame, app: &mut TuiApp, area: Rect) {
-    let focused = app.focus == FocusedPane::Messages;
     let block = Block::default()
         .title(" Messages ")
         .borders(Borders::ALL)
-        .border_style(border_style(focused));
+        .border_style(Style::default().fg(Color::Cyan));
 
     let mut lines: Vec<Line> = Vec::new();
 
@@ -140,6 +329,15 @@ fn draw_messages(f: &mut Frame, app: &mut TuiApp, area: Rect) {
                     lines.push(Line::from(text_line.to_string()));
                 }
             }
+            "system" => {
+                lines.push(Line::from(""));
+                for text_line in entry.text.lines() {
+                    lines.push(Line::from(vec![Span::styled(
+                        text_line.to_string(),
+                        Style::default().fg(Color::DarkGray),
+                    )]));
+                }
+            }
             _ => {}
         }
     }
@@ -161,34 +359,39 @@ fn draw_messages(f: &mut Frame, app: &mut TuiApp, area: Rect) {
 
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
-            "No messages yet. Press 'i' to type a task.",
+            "No messages yet. Type a task and press Enter.",
             Style::default().fg(Color::DarkGray),
         )));
     }
 
     // Clamp scroll so we never scroll past content.
     // Account for line wrapping: each line may occupy multiple visual rows.
-    let inner_height = area.height.saturating_sub(2) as u16;
+    // Use u32 to avoid overflow for very long responses (u16 max = 65535 lines).
+    let inner_height = area.height.saturating_sub(2) as u32;
     let inner_width = area.width.saturating_sub(2).max(1) as usize;
-    let total_lines: u16 = lines
+    let total_lines: u32 = lines
         .iter()
         .map(|line| {
             let width: usize = line.spans.iter().map(|s| s.content.len()).sum();
             if width == 0 {
-                1
+                1u32
             } else {
-                ((width + inner_width - 1) / inner_width) as u16
+                width.div_ceil(inner_width) as u32
             }
         })
         .sum();
     let max_scroll = total_lines.saturating_sub(inner_height);
+    // Clamp to u16 range for ratatui's scroll API (65535 lines is still enormous)
+    let max_scroll_u16 = max_scroll.min(u16::MAX as u32) as u16;
     let scroll = if app.message_auto_scroll {
-        max_scroll
+        max_scroll_u16
     } else {
-        app.message_scroll.min(max_scroll)
+        app.message_scroll.min(max_scroll_u16)
     };
     // Write clamped value back so up/down keys work immediately
     app.message_scroll = scroll;
+    // Tell the app how tall the viewport is (for PageUp/PageDown)
+    app.viewport_height = inner_height.min(u16::MAX as u32) as u16;
 
     let para = Paragraph::new(lines)
         .block(block)
@@ -198,8 +401,8 @@ fn draw_messages(f: &mut Frame, app: &mut TuiApp, area: Rect) {
 
     // Scrollbar
     if total_lines > inner_height {
-        let mut scrollbar_state = ScrollbarState::new(max_scroll as usize)
-            .position(scroll as usize);
+        let mut scrollbar_state =
+            ScrollbarState::new(max_scroll_u16 as usize).position(scroll as usize);
         f.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
@@ -210,68 +413,29 @@ fn draw_messages(f: &mut Frame, app: &mut TuiApp, area: Rect) {
     }
 }
 
-fn draw_context(f: &mut Frame, app: &TuiApp, area: Rect) {
-    let focused = app.focus == FocusedPane::Context;
+fn draw_yaml_placeholder(f: &mut Frame, area: Rect) {
     let block = Block::default()
-        .title(" Context ")
+        .title(" YAML ")
         .borders(Borders::ALL)
-        .border_style(border_style(focused));
-
-    if let Some(ctx) = &app.context {
-        let lines: Vec<Line> = ctx
-            .segments
-            .iter()
-            .map(|s| {
-                let status_char = match s.status {
-                    crate::kernel::context_store::SegmentStatus::Active => "A",
-                    crate::kernel::context_store::SegmentStatus::Shelved => "S",
-                    crate::kernel::context_store::SegmentStatus::Folded => "F",
-                };
-                Line::from(vec![
-                    Span::styled(
-                        format!("[{status_char}] "),
-                        Style::default().fg(if status_char == "A" {
-                            Color::Green
-                        } else {
-                            Color::DarkGray
-                        }),
-                    ),
-                    Span::raw(format!("{}:{}", s.tag, s.id)),
-                    Span::styled(
-                        format!(" {:.0}%", s.relevance * 100.0),
-                        Style::default().fg(Color::Cyan),
-                    ),
-                    Span::styled(
-                        format!(" {}", dashboard::format_bytes(s.size)),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ])
-            })
-            .collect();
-        let para = Paragraph::new(lines).block(block);
-        f.render_widget(para, area);
-    } else {
-        let para = Paragraph::new("No context selected").block(block);
-        f.render_widget(para, area);
-    }
+        .border_style(Style::default().fg(Color::DarkGray));
+    let para = Paragraph::new(Span::styled(
+        "Coming soon — organism YAML editor",
+        Style::default().fg(Color::DarkGray),
+    ))
+    .block(block);
+    f.render_widget(para, area);
 }
 
-fn draw_input(f: &mut Frame, app: &TuiApp, area: Rect) {
-    let focused = app.focus == FocusedPane::Input;
+fn draw_wasm_placeholder(f: &mut Frame, area: Rect) {
     let block = Block::default()
-        .title(" Task ")
+        .title(" WASM ")
         .borders(Borders::ALL)
-        .border_style(border_style(focused));
-
-    let display_text = if app.input_text.is_empty() {
-        "\u{2588}".to_string() // block cursor
-    } else {
-        format!("{}\u{2588}", app.input_text) // text + cursor
-    };
-
-    let style = Style::default().fg(Color::White);
-
-    let para = Paragraph::new(display_text).style(style).block(block);
+        .border_style(Style::default().fg(Color::DarkGray));
+    let para = Paragraph::new(Span::styled(
+        "Coming soon — WASM tool inventory",
+        Style::default().fg(Color::DarkGray),
+    ))
+    .block(block);
     f.render_widget(para, area);
 }
 
@@ -289,11 +453,18 @@ fn draw_status(f: &mut Frame, app: &TuiApp, area: Rect) {
         ),
     };
 
-    let focus_name = match app.focus {
-        FocusedPane::Threads => "Threads",
-        FocusedPane::Messages => "Messages",
-        FocusedPane::Context => "Context",
-        FocusedPane::Input => "Input",
+    let tab_name = match app.active_tab {
+        ActiveTab::Messages => "Messages",
+        ActiveTab::Threads => "Threads",
+        ActiveTab::Yaml => "YAML",
+        ActiveTab::Wasm => "WASM",
+        ActiveTab::Debug => "Debug",
+    };
+
+    let tab_hint = if app.debug_mode {
+        "^1/2/3/4/5:Tabs"
+    } else {
+        "^1/2/3/4:Tabs"
     };
 
     let status = Line::from(vec![
@@ -316,12 +487,12 @@ fn draw_status(f: &mut Frame, app: &TuiApp, area: Rect) {
         ),
         Span::raw("  "),
         Span::styled(
-            format!("[{focus_name}]"),
+            format!("[{tab_name}]"),
             Style::default().fg(Color::Green),
         ),
         Span::raw("  "),
         Span::styled(
-            "Enter:Send  \u{2191}\u{2193}:Scroll  PgUp/Dn:Fast  Esc:Clear  Ctrl+C:Quit",
+            format!("Enter:Send  {tab_hint}  Tab:Focus  \u{2191}\u{2193}:Scroll  Esc:Clear  ^C:Quit"),
             Style::default().fg(Color::DarkGray),
         ),
     ]);

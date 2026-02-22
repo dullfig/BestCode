@@ -116,12 +116,17 @@ struct Cli {
     /// Kernel data directory (default: .bestcode/)
     #[arg(long)]
     data: Option<String>,
+
+    /// Enable debug tab (activity trace, diagnostics)
+    #[arg(long)]
+    debug: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Parse CLI
     let cli = Cli::parse();
+    let debug = cli.debug;
     let work_dir = cli.dir.unwrap_or_else(|| ".".into());
     let model = cli
         .model
@@ -197,7 +202,7 @@ async fn main() -> Result<()> {
     pipeline.run();
 
     // Run TUI (blocks until quit)
-    run_tui(&pipeline).await?;
+    run_tui(&pipeline, debug).await?;
 
     // Shutdown
     info!("Shutting down");
