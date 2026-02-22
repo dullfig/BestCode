@@ -824,29 +824,61 @@ listeners:
         protocol: https
         hosts: [api.anthropic.com]
 
-  - name: file-ops
-    payload_class: tools.FileOpsRequest
-    handler: tools.file_ops.handle
-    description: "File operations"
+  - name: file-read
+    payload_class: tools.FileReadRequest
+    handler: tools.file_read.handle
+    description: "File read"
 
-  - name: shell
-    payload_class: tools.ShellRequest
-    handler: tools.shell.handle
-    description: "Shell execution"
+  - name: file-write
+    payload_class: tools.FileWriteRequest
+    handler: tools.file_write.handle
+    description: "File write"
+
+  - name: file-edit
+    payload_class: tools.FileEditRequest
+    handler: tools.file_edit.handle
+    description: "File edit"
+
+  - name: glob
+    payload_class: tools.GlobRequest
+    handler: tools.glob.handle
+    description: "Glob search"
+
+  - name: grep
+    payload_class: tools.GrepRequest
+    handler: tools.grep.handle
+    description: "Grep search"
+
+  - name: command-exec
+    payload_class: tools.CommandExecRequest
+    handler: tools.command_exec.handle
+    description: "Command execution"
 
 profiles:
   admin:
     linux_user: agentos-admin
-    listeners: [file-ops, shell, llm-pool]
+    listeners: [file-read, file-write, file-edit, glob, grep, command-exec, llm-pool]
     network: [llm-pool]
     journal:
       retain_days: 90
   restricted:
     linux_user: agentos-restricted
-    listeners: [file-ops]
+    listeners: [file-read, glob, grep]
     journal: prune_on_delivery
 "#;
         parse_organism(yaml).unwrap()
+    }
+
+    fn register_core_tools(
+        builder: AgentPipelineBuilder,
+    ) -> Result<AgentPipelineBuilder, String> {
+        builder
+            .register("file-read", crate::tools::file_read::FileReadTool)?
+            .register("file-write", crate::tools::file_write::FileWriteTool)?
+            .register("file-edit", crate::tools::file_edit::FileEditTool)?
+            .register("glob", crate::tools::glob_tool::GlobTool)?
+            .register("grep", crate::tools::grep::GrepTool)?
+            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
     }
 
     #[tokio::test]
@@ -860,12 +892,10 @@ profiles:
             "http://localhost:19999".into(),
         );
 
-        let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+        let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
-            .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
-            .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
+            .unwrap();
+        let pipeline = register_core_tools(builder)
             .unwrap()
             .with_port_manager()
             .unwrap()
@@ -873,8 +903,8 @@ profiles:
             .unwrap();
 
         assert!(pipeline.organism().get_listener("llm-pool").is_some());
-        assert!(pipeline.organism().get_listener("file-ops").is_some());
-        assert!(pipeline.organism().get_listener("shell").is_some());
+        assert!(pipeline.organism().get_listener("file-read").is_some());
+        assert!(pipeline.organism().get_listener("command-exec").is_some());
     }
 
     #[tokio::test]
@@ -891,9 +921,17 @@ profiles:
         let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
             .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .register("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
+            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .unwrap()
+            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .unwrap()
+            .register("glob", crate::tools::glob_tool::GlobTool)
+            .unwrap()
+            .register("grep", crate::tools::grep::GrepTool)
+            .unwrap()
+            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
             .unwrap()
             .with_port_manager()
             .unwrap()
@@ -902,31 +940,31 @@ profiles:
 
         pipeline.run();
 
-        // Inject a FileOps request under admin profile
+        // Inject a FileRead request under admin profile
         let envelope = build_envelope(
             "test",
-            "file-ops",
+            "file-read",
             "thread-1",
-            b"<FileOpsRequest><action>read</action><path>/etc/hostname</path></FileOpsRequest>",
+            b"<FileReadRequest><path>/etc/hostname</path></FileReadRequest>",
         )
         .unwrap();
 
         let result = pipeline
-            .inject_checked(envelope, "thread-1", "admin", "file-ops")
+            .inject_checked(envelope, "thread-1", "admin", "file-read")
             .await;
         assert!(result.is_ok());
 
-        // Inject a Shell request under admin profile
+        // Inject a CommandExec request under admin profile
         let envelope2 = build_envelope(
             "test",
-            "shell",
+            "command-exec",
             "thread-2",
-            b"<ShellRequest><command>echo hello</command></ShellRequest>",
+            b"<CommandExecRequest><command>echo hello</command></CommandExecRequest>",
         )
         .unwrap();
 
         let result = pipeline
-            .inject_checked(envelope2, "thread-2", "admin", "shell")
+            .inject_checked(envelope2, "thread-2", "admin", "command-exec")
             .await;
         assert!(result.is_ok());
 
@@ -947,9 +985,17 @@ profiles:
         let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
             .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .register("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
+            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .unwrap()
+            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .unwrap()
+            .register("glob", crate::tools::glob_tool::GlobTool)
+            .unwrap()
+            .register("grep", crate::tools::grep::GrepTool)
+            .unwrap()
+            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
             .unwrap()
             .with_port_manager()
             .unwrap()
@@ -958,17 +1004,17 @@ profiles:
 
         pipeline.run();
 
-        // Restricted profile can reach file-ops
+        // Restricted profile can reach file-read
         let envelope = build_envelope(
             "test",
-            "file-ops",
+            "file-read",
             "thread-1",
-            b"<FileOpsRequest><action>read</action><path>/tmp/x</path></FileOpsRequest>",
+            b"<FileReadRequest><path>/tmp/x</path></FileReadRequest>",
         )
         .unwrap();
 
         let ok = pipeline
-            .inject_checked(envelope, "thread-1", "restricted", "file-ops")
+            .inject_checked(envelope, "thread-1", "restricted", "file-read")
             .await;
         assert!(ok.is_ok());
 
@@ -987,17 +1033,17 @@ profiles:
         assert!(err.is_err());
         assert!(err.unwrap_err().contains("cannot reach"));
 
-        // Restricted profile also CANNOT reach shell
-        let shell_envelope = build_envelope(
+        // Restricted profile also CANNOT reach command-exec
+        let cmd_envelope = build_envelope(
             "test",
-            "shell",
+            "command-exec",
             "thread-3",
-            b"<ShellRequest><command>whoami</command></ShellRequest>",
+            b"<CommandExecRequest><command>whoami</command></CommandExecRequest>",
         )
         .unwrap();
 
         let err = pipeline
-            .inject_checked(shell_envelope, "thread-3", "restricted", "shell")
+            .inject_checked(cmd_envelope, "thread-3", "restricted", "command-exec")
             .await;
         assert!(err.is_err());
         assert!(err.unwrap_err().contains("cannot reach"));
@@ -1077,9 +1123,17 @@ profiles:
         let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
             .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .register("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
+            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .unwrap()
+            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .unwrap()
+            .register("glob", crate::tools::glob_tool::GlobTool)
+            .unwrap()
+            .register("grep", crate::tools::grep::GrepTool)
+            .unwrap()
+            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
             .unwrap()
             .with_port_manager()
             .unwrap();
@@ -1122,26 +1176,46 @@ listeners:
     handler: treesitter.handle
     description: "Tree-sitter code indexing"
 
-  - name: file-ops
-    payload_class: tools.FileOpsRequest
-    handler: tools.file_ops.handle
-    description: "File operations"
+  - name: file-read
+    payload_class: tools.FileReadRequest
+    handler: tools.file_read.handle
+    description: "File read"
 
-  - name: shell
-    payload_class: tools.ShellRequest
-    handler: tools.shell.handle
-    description: "Shell execution"
+  - name: file-write
+    payload_class: tools.FileWriteRequest
+    handler: tools.file_write.handle
+    description: "File write"
+
+  - name: file-edit
+    payload_class: tools.FileEditRequest
+    handler: tools.file_edit.handle
+    description: "File edit"
+
+  - name: glob
+    payload_class: tools.GlobRequest
+    handler: tools.glob.handle
+    description: "Glob search"
+
+  - name: grep
+    payload_class: tools.GrepRequest
+    handler: tools.grep.handle
+    description: "Grep search"
+
+  - name: command-exec
+    payload_class: tools.CommandExecRequest
+    handler: tools.command_exec.handle
+    description: "Command execution"
 
 profiles:
   admin:
     linux_user: agentos-admin
-    listeners: [file-ops, shell, llm-pool, librarian, codebase-index]
+    listeners: [file-read, file-write, file-edit, glob, grep, command-exec, llm-pool, librarian, codebase-index]
     network: [llm-pool]
     journal:
       retain_days: 90
   restricted:
     linux_user: agentos-restricted
-    listeners: [file-ops, codebase-index]
+    listeners: [file-read, glob, grep, codebase-index]
     journal: prune_on_delivery
 "#;
         parse_organism(yaml).unwrap()
@@ -1158,16 +1232,14 @@ profiles:
             "http://localhost:19999".into(),
         );
 
-        let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+        let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
             .unwrap()
             .with_librarian()
             .unwrap()
             .with_code_index()
-            .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
-            .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
+            .unwrap();
+        let pipeline = register_core_tools(builder)
             .unwrap()
             .with_port_manager()
             .unwrap()
@@ -1199,9 +1271,17 @@ profiles:
             .unwrap()
             .with_code_index()
             .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .register("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
+            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .unwrap()
+            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .unwrap()
+            .register("glob", crate::tools::glob_tool::GlobTool)
+            .unwrap()
+            .register("grep", crate::tools::grep::GrepTool)
+            .unwrap()
+            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
             .unwrap();
 
         // Librarian should be attached
@@ -1230,9 +1310,17 @@ profiles:
             .unwrap()
             .with_code_index()
             .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .register("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
+            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .unwrap()
+            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .unwrap()
+            .register("glob", crate::tools::glob_tool::GlobTool)
+            .unwrap()
+            .register("grep", crate::tools::grep::GrepTool)
+            .unwrap()
+            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
             .unwrap()
             .with_port_manager()
             .unwrap()
@@ -1276,9 +1364,17 @@ profiles:
             .unwrap()
             .with_code_index()
             .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .register("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
+            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .unwrap()
+            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .unwrap()
+            .register("glob", crate::tools::glob_tool::GlobTool)
+            .unwrap()
+            .register("grep", crate::tools::grep::GrepTool)
+            .unwrap()
+            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
             .unwrap()
             .build()
             .unwrap();
@@ -1335,9 +1431,17 @@ profiles:
             .unwrap()
             .with_code_index()
             .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .register("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
+            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .unwrap()
+            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .unwrap()
+            .register("glob", crate::tools::glob_tool::GlobTool)
+            .unwrap()
+            .register("grep", crate::tools::grep::GrepTool)
+            .unwrap()
+            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
             .unwrap();
 
         assert!(builder.code_index.is_some());
@@ -1376,15 +1480,35 @@ listeners:
     handler: treesitter.handle
     description: "Tree-sitter code indexing"
 
-  - name: file-ops
-    payload_class: tools.FileOpsRequest
-    handler: tools.file_ops.handle
-    description: "File operations"
+  - name: file-read
+    payload_class: tools.FileReadRequest
+    handler: tools.file_read.handle
+    description: "File read"
 
-  - name: shell
-    payload_class: tools.ShellRequest
-    handler: tools.shell.handle
-    description: "Shell execution"
+  - name: file-write
+    payload_class: tools.FileWriteRequest
+    handler: tools.file_write.handle
+    description: "File write"
+
+  - name: file-edit
+    payload_class: tools.FileEditRequest
+    handler: tools.file_edit.handle
+    description: "File edit"
+
+  - name: glob
+    payload_class: tools.GlobRequest
+    handler: tools.glob.handle
+    description: "Glob search"
+
+  - name: grep
+    payload_class: tools.GrepRequest
+    handler: tools.grep.handle
+    description: "Grep search"
+
+  - name: command-exec
+    payload_class: tools.CommandExecRequest
+    handler: tools.command_exec.handle
+    description: "Command execution"
 
   - name: coding-agent
     payload_class: agent.AgentTask
@@ -1392,17 +1516,17 @@ listeners:
     description: "Opus coding agent"
     is_agent: true
     librarian: true
-    peers: [file-ops, shell, codebase-index]
+    peers: [file-read, file-write, file-edit, glob, grep, command-exec, codebase-index]
 
 profiles:
   coding:
     linux_user: agentos-coding
-    listeners: [coding-agent, file-ops, shell, codebase-index, llm-pool, librarian]
+    listeners: [coding-agent, file-read, file-write, file-edit, glob, grep, command-exec, codebase-index, llm-pool, librarian]
     network: [llm-pool]
     journal: retain_forever
   restricted:
     linux_user: agentos-restricted
-    listeners: [file-ops, codebase-index]
+    listeners: [file-read, glob, grep, codebase-index]
     journal: prune_on_delivery
 "#;
         parse_organism(yaml).unwrap()
@@ -1419,16 +1543,14 @@ profiles:
             "http://localhost:19999".into(),
         );
 
-        let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+        let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
             .unwrap()
             .with_librarian()
             .unwrap()
             .with_code_index()
-            .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
-            .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
+            .unwrap();
+        let pipeline = register_core_tools(builder)
             .unwrap()
             .with_coding_agent()
             .unwrap()
@@ -1436,8 +1558,8 @@ profiles:
             .unwrap();
 
         assert!(pipeline.organism().get_listener("coding-agent").is_some());
-        assert!(pipeline.organism().get_listener("file-ops").is_some());
-        assert!(pipeline.organism().get_listener("shell").is_some());
+        assert!(pipeline.organism().get_listener("file-read").is_some());
+        assert!(pipeline.organism().get_listener("command-exec").is_some());
     }
 
     #[tokio::test]
@@ -1451,16 +1573,14 @@ profiles:
             "http://localhost:19999".into(),
         );
 
-        let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+        let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
             .unwrap()
             .with_librarian()
             .unwrap()
             .with_code_index()
-            .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
-            .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
+            .unwrap();
+        let pipeline = register_core_tools(builder)
             .unwrap()
             .with_coding_agent()
             .unwrap()
@@ -1469,8 +1589,8 @@ profiles:
 
         // Coding profile can reach everything it needs
         assert!(pipeline.security().can_reach("coding", "coding-agent"));
-        assert!(pipeline.security().can_reach("coding", "file-ops"));
-        assert!(pipeline.security().can_reach("coding", "shell"));
+        assert!(pipeline.security().can_reach("coding", "file-read"));
+        assert!(pipeline.security().can_reach("coding", "command-exec"));
         assert!(pipeline.security().can_reach("coding", "codebase-index"));
         assert!(pipeline.security().can_reach("coding", "llm-pool"));
         assert!(pipeline.security().can_reach("coding", "librarian"));
@@ -1487,16 +1607,14 @@ profiles:
             "http://localhost:19999".into(),
         );
 
-        let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+        let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
             .unwrap()
             .with_librarian()
             .unwrap()
             .with_code_index()
-            .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
-            .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
+            .unwrap();
+        let pipeline = register_core_tools(builder)
             .unwrap()
             .with_coding_agent()
             .unwrap()
@@ -1505,12 +1623,12 @@ profiles:
 
         // Restricted profile CANNOT reach coding agent — structural impossibility
         assert!(!pipeline.security().can_reach("restricted", "coding-agent"));
-        // Restricted CANNOT reach shell
-        assert!(!pipeline.security().can_reach("restricted", "shell"));
+        // Restricted CANNOT reach command-exec
+        assert!(!pipeline.security().can_reach("restricted", "command-exec"));
         // Restricted CANNOT reach llm-pool
         assert!(!pipeline.security().can_reach("restricted", "llm-pool"));
-        // Restricted CAN reach file-ops and codebase-index
-        assert!(pipeline.security().can_reach("restricted", "file-ops"));
+        // Restricted CAN reach file-read and codebase-index
+        assert!(pipeline.security().can_reach("restricted", "file-read"));
         assert!(pipeline
             .security()
             .can_reach("restricted", "codebase-index"));
@@ -1545,14 +1663,13 @@ profiles:
             "http://localhost:19999".into(),
         );
 
-        let result = AgentPipelineBuilder::new(org, &dir.path().join("data"))
-            .with_llm_pool(pool)
-            .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
-            .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
-            .unwrap()
-            .with_coding_agent();
+        let result = register_core_tools(
+            AgentPipelineBuilder::new(org, &dir.path().join("data"))
+                .with_llm_pool(pool)
+                .unwrap(),
+        )
+        .unwrap()
+        .with_coding_agent();
 
         match result {
             Err(e) => assert!(
@@ -1574,16 +1691,14 @@ profiles:
             "http://localhost:19999".into(),
         );
 
-        let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+        let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
             .unwrap()
             .with_librarian()
             .unwrap()
             .with_code_index()
-            .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
-            .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
+            .unwrap();
+        let mut pipeline = register_core_tools(builder)
             .unwrap()
             .with_coding_agent()
             .unwrap()
@@ -1622,16 +1737,14 @@ profiles:
             "http://localhost:19999".into(),
         );
 
-        let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+        let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
             .unwrap()
             .with_librarian()
             .unwrap()
             .with_code_index()
-            .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
-            .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
+            .unwrap();
+        let mut pipeline = register_core_tools(builder)
             .unwrap()
             .with_coding_agent()
             .unwrap()
@@ -1670,14 +1783,12 @@ profiles:
         );
 
         // Build without librarian — coding agent should still work
-        let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+        let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
             .unwrap()
             .with_code_index()
-            .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
-            .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
+            .unwrap();
+        let pipeline = register_core_tools(builder)
             .unwrap()
             .with_coding_agent()
             .unwrap()
@@ -1697,11 +1808,15 @@ profiles:
         let peer_names: Vec<&str> = def.peers.iter().map(|s| s.as_str()).collect();
         let tool_defs = crate::agent::tools::build_tool_definitions(&peer_names);
 
-        // Should have definitions for file-ops, shell, codebase-index
-        assert_eq!(tool_defs.len(), 3);
+        // Should have definitions for all six tools + codebase-index
+        assert_eq!(tool_defs.len(), 7);
         let names: Vec<&str> = tool_defs.iter().map(|d| d.name.as_str()).collect();
-        assert!(names.contains(&"file-ops"));
-        assert!(names.contains(&"shell"));
+        assert!(names.contains(&"file-read"));
+        assert!(names.contains(&"file-write"));
+        assert!(names.contains(&"file-edit"));
+        assert!(names.contains(&"glob"));
+        assert!(names.contains(&"grep"));
+        assert!(names.contains(&"command-exec"));
         assert!(names.contains(&"codebase-index"));
 
         // Also verify the pipeline builds cleanly
@@ -1711,14 +1826,12 @@ profiles:
             "http://localhost:19999".into(),
         );
 
-        let _pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+        let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
             .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
-            .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
-            .unwrap()
             .with_code_index()
+            .unwrap();
+        let _pipeline = register_core_tools(builder)
             .unwrap()
             .with_coding_agent()
             .unwrap()
@@ -1749,10 +1862,10 @@ listeners:
       capabilities:
         stdio: true
 
-  - name: file-ops
-    payload_class: tools.FileOpsRequest
-    handler: tools.file_ops.handle
-    description: "File operations (stub)"
+  - name: file-read
+    payload_class: tools.FileReadRequest
+    handler: tools.file_read.handle
+    description: "File read"
 
   - name: llm-pool
     payload_class: llm.LlmRequest
@@ -1767,11 +1880,11 @@ listeners:
 profiles:
   admin:
     linux_user: agentos-admin
-    listeners: [echo, file-ops, llm-pool]
+    listeners: [echo, file-read, llm-pool]
     journal: retain_forever
   restricted:
     linux_user: agentos-restricted
-    listeners: [file-ops]
+    listeners: [file-read]
     journal: prune_on_delivery
 "#;
         parse_organism(yaml).unwrap()
@@ -1785,7 +1898,7 @@ profiles:
         let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_wasm_tools(&echo_wasm_dir())
             .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .register("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
             .build()
             .unwrap();
@@ -1801,7 +1914,7 @@ profiles:
         let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_wasm_tools(&echo_wasm_dir())
             .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .register("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
             .build()
             .unwrap();
@@ -1819,7 +1932,7 @@ profiles:
         let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_wasm_tools(&echo_wasm_dir())
             .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .register("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
             .build()
             .unwrap();
@@ -1838,7 +1951,7 @@ profiles:
         let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_wasm_tools(&echo_wasm_dir())
             .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .register("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
             .build()
             .unwrap();
@@ -1869,7 +1982,7 @@ profiles:
         let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_wasm_tools(&echo_wasm_dir())
             .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .register("file-read", crate::tools::file_read::FileReadTool)
             .unwrap();
 
         // WASM registry should have the echo tool definition
@@ -1921,7 +2034,7 @@ profiles:
         let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_wasm_tools(&echo_wasm_dir())
             .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .register("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
             .build()
             .unwrap();
@@ -1941,16 +2054,16 @@ profiles:
             .await
             .is_ok());
 
-        // Native file-ops stub
-        let fops_env = build_envelope(
+        // Native file-read tool
+        let fread_env = build_envelope(
             "test",
-            "file-ops",
+            "file-read",
             "thread-2",
-            b"<FileOpsRequest><action>read</action><path>/tmp/x</path></FileOpsRequest>",
+            b"<FileReadRequest><path>/tmp/x</path></FileReadRequest>",
         )
         .unwrap();
         assert!(pipeline
-            .inject_checked(fops_env, "thread-2", "admin", "file-ops")
+            .inject_checked(fread_env, "thread-2", "admin", "file-read")
             .await
             .is_ok());
 
@@ -1965,7 +2078,7 @@ profiles:
         let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_wasm_tools(&echo_wasm_dir())
             .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .register("file-read", crate::tools::file_read::FileReadTool)
             .unwrap();
 
         let reg = builder.wasm_registry.as_ref().unwrap();
@@ -1980,7 +2093,7 @@ profiles:
         let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_wasm_tools(&echo_wasm_dir())
             .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
+            .register("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
             .build()
             .unwrap();
@@ -2006,14 +2119,12 @@ profiles:
             "http://localhost:19999".into(),
         );
 
-        let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+        let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
             .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
-            .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
-            .unwrap()
             .with_code_index()
+            .unwrap();
+        let pipeline = register_core_tools(builder)
             .unwrap()
             .with_coding_agent()
             .unwrap()
@@ -2229,19 +2340,51 @@ listeners:
         protocol: https
         hosts: [api.anthropic.com]
 
-  - name: file-ops
-    payload_class: tools.FileOpsRequest
-    handler: tools.file_ops.handle
-    description: "File operations"
+  - name: file-read
+    payload_class: tools.FileReadRequest
+    handler: tools.file_read.handle
+    description: "File read"
     semantic_description: |
-      This tool reads, writes, and manages files on the local filesystem.
+      This tool reads file contents from the local filesystem.
       Use it when you need to examine source code, read configuration files,
-      write new files, create directories, or check if files exist.
+      or inspect any file's contents.
 
-  - name: shell
-    payload_class: tools.ShellRequest
-    handler: tools.shell.handle
-    description: "Shell execution"
+  - name: file-write
+    payload_class: tools.FileWriteRequest
+    handler: tools.file_write.handle
+    description: "File write"
+    semantic_description: |
+      This tool writes content to files on the local filesystem.
+      Use it when you need to create new files or overwrite existing ones.
+
+  - name: file-edit
+    payload_class: tools.FileEditRequest
+    handler: tools.file_edit.handle
+    description: "File edit"
+    semantic_description: |
+      This tool performs surgical edits on existing files using search-and-replace.
+      Use it when you need to modify specific sections of a file without rewriting the whole thing.
+
+  - name: glob
+    payload_class: tools.GlobRequest
+    handler: tools.glob.handle
+    description: "Glob search"
+    semantic_description: |
+      This tool finds files matching glob patterns in the filesystem.
+      Use it when you need to discover files by name pattern, extension, or directory structure.
+
+  - name: grep
+    payload_class: tools.GrepRequest
+    handler: tools.grep.handle
+    description: "Grep search"
+    semantic_description: |
+      This tool searches file contents using regular expressions.
+      Use it when you need to find code patterns, string occurrences, or text across files.
+
+  - name: command-exec
+    payload_class: tools.CommandExecRequest
+    handler: tools.command_exec.handle
+    description: "Command execution"
     semantic_description: |
       This tool executes shell commands and returns their output.
       Use it when you need to run programs, compile code, run tests,
@@ -2252,12 +2395,12 @@ listeners:
     handler: agent.handle
     description: "Opus coding agent"
     agent: true
-    peers: [file-ops, shell]
+    peers: [file-read, file-write, file-edit, glob, grep, command-exec]
 
 profiles:
   coding:
     linux_user: agentos-coding
-    listeners: [coding-agent, file-ops, shell, llm-pool]
+    listeners: [coding-agent, file-read, file-write, file-edit, glob, grep, command-exec, llm-pool]
     network: [llm-pool]
     journal: retain_forever
 "#;
@@ -2275,12 +2418,10 @@ profiles:
             "http://localhost:19999".into(),
         );
 
-        let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
+        let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
-            .unwrap()
-            .register("file-ops", crate::tools::file_ops::FileOpsStub)
-            .unwrap()
-            .register("shell", crate::tools::shell::ShellStub)
+            .unwrap();
+        let pipeline = register_core_tools(builder)
             .unwrap()
             .with_semantic_router()
             .unwrap()
@@ -2290,24 +2431,24 @@ profiles:
             .unwrap();
 
         assert!(pipeline.organism().get_listener("coding-agent").is_some());
-        assert!(pipeline.organism().get_listener("file-ops").is_some());
+        assert!(pipeline.organism().get_listener("file-read").is_some());
     }
 
     #[test]
     fn pipeline_event_semantic_match() {
         let event = PipelineEvent::SemanticMatch {
             thread_id: "t1".into(),
-            tool_name: "file-ops".into(),
+            tool_name: "file-read".into(),
             score: 0.87,
         };
         let cloned = event.clone();
         let debug = format!("{:?}", cloned);
         assert!(debug.contains("SemanticMatch"));
-        assert!(debug.contains("file-ops"));
+        assert!(debug.contains("file-read"));
 
         let fill_event = PipelineEvent::FormFillAttempt {
             thread_id: "t1".into(),
-            tool_name: "file-ops".into(),
+            tool_name: "file-read".into(),
             model: "haiku".into(),
             success: true,
         };

@@ -1,54 +1,157 @@
 //! Tool Definition Bridge — ToolPeer → Anthropic ToolDefinition.
 //!
 //! Generates JSON Schema tool definitions from registered ToolPeers.
-//! Hand-written schemas for Phase 4's known tools (file-ops, shell, codebase-index).
-//! Phase 5 (WASM+WIT) will auto-generate from WIT definitions.
+//! Hand-written schemas for the core tool set.
+//! WASM tools auto-generate from WIT definitions.
 
 use crate::llm::types::ToolDefinition;
 use crate::wasm::definitions::WasmToolRegistry;
 
-/// Build a ToolDefinition for the file-ops tool.
-pub fn file_ops_definition() -> ToolDefinition {
+/// Build a ToolDefinition for the file-read tool.
+pub fn file_read_definition() -> ToolDefinition {
     ToolDefinition {
-        name: "file-ops".into(),
-        description: "File operations: read, write, or list files and directories.".into(),
+        name: "file-read".into(),
+        description: "Read file contents with line numbers. Supports offset and limit for large files. Detects binary files.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["read", "write", "list"],
-                    "description": "The file operation to perform"
-                },
                 "path": {
                     "type": "string",
-                    "description": "The file or directory path"
+                    "description": "The file path to read"
                 },
-                "content": {
-                    "type": "string",
-                    "description": "Content to write (only for 'write' action)"
+                "offset": {
+                    "type": "integer",
+                    "description": "Starting line number (1-based, default: 1)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum lines to read (default: 2000)"
                 }
             },
-            "required": ["action", "path"]
+            "required": ["path"]
         }),
     }
 }
 
-/// Build a ToolDefinition for the shell tool.
-pub fn shell_definition() -> ToolDefinition {
+/// Build a ToolDefinition for the file-write tool.
+pub fn file_write_definition() -> ToolDefinition {
     ToolDefinition {
-        name: "shell".into(),
-        description: "Execute a shell command and return stdout, stderr, and exit code.".into(),
+        name: "file-write".into(),
+        description: "Write or create a file. Auto-creates parent directories.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The file path to write"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The content to write to the file"
+                }
+            },
+            "required": ["path", "content"]
+        }),
+    }
+}
+
+/// Build a ToolDefinition for the file-edit tool.
+pub fn file_edit_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "file-edit".into(),
+        description: "Surgical text replacement in a file. Replaces old_string with new_string. The old_string must match exactly once. Returns unified diff.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The file path to edit"
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "The exact text to find and replace (must be unique in the file)"
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "The replacement text"
+                }
+            },
+            "required": ["path", "old_string", "new_string"]
+        }),
+    }
+}
+
+/// Build a ToolDefinition for the glob tool.
+pub fn glob_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "glob".into(),
+        description: "Find files matching a glob pattern (e.g. **/*.rs, src/*.txt).".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "The glob pattern to match (e.g. **/*.rs)"
+                },
+                "base_path": {
+                    "type": "string",
+                    "description": "Base directory for the pattern (default: current directory)"
+                }
+            },
+            "required": ["pattern"]
+        }),
+    }
+}
+
+/// Build a ToolDefinition for the grep tool.
+pub fn grep_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "grep".into(),
+        description: "Regex search across files. Recursively searches directories, skips binary files.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Regex pattern to search for"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "File or directory to search (default: current directory)"
+                },
+                "glob_filter": {
+                    "type": "string",
+                    "description": "Filter files by glob (e.g. *.rs)"
+                },
+                "case_insensitive": {
+                    "type": "boolean",
+                    "description": "Case insensitive search (default: false)"
+                }
+            },
+            "required": ["pattern"]
+        }),
+    }
+}
+
+/// Build a ToolDefinition for the command-exec tool.
+pub fn command_exec_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "command-exec".into(),
+        description: "Execute a shell command. Only allowed commands can be run (cargo, git, npm, etc). Captures stdout, stderr, and exit code.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The shell command to execute"
+                    "description": "The command to execute"
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in milliseconds (default: 5000)"
+                    "description": "Timeout in seconds (default: 30)"
+                },
+                "working_dir": {
+                    "type": "string",
+                    "description": "Working directory for the command"
                 }
             },
             "required": ["command"]
@@ -104,8 +207,12 @@ pub fn build_tool_definitions(peer_names: &[&str]) -> Vec<ToolDefinition> {
 /// Get the tool definition for a named peer, if known.
 pub fn definition_for_peer(name: &str) -> Option<ToolDefinition> {
     match name {
-        "file-ops" => Some(file_ops_definition()),
-        "shell" => Some(shell_definition()),
+        "file-read" => Some(file_read_definition()),
+        "file-write" => Some(file_write_definition()),
+        "file-edit" => Some(file_edit_definition()),
+        "glob" => Some(glob_definition()),
+        "grep" => Some(grep_definition()),
+        "command-exec" => Some(command_exec_definition()),
         "codebase-index" => Some(codebase_index_definition()),
         _ => None,
     }
@@ -136,27 +243,65 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_ops_def_is_valid() {
-        let def = file_ops_definition();
-        assert_eq!(def.name, "file-ops");
-        assert!(def.description.contains("File"));
+    fn file_read_def_is_valid() {
+        let def = file_read_definition();
+        assert_eq!(def.name, "file-read");
+        assert!(def.description.contains("Read"));
         assert_eq!(def.input_schema["type"], "object");
         let props = &def.input_schema["properties"];
-        assert!(props.get("action").is_some());
         assert!(props.get("path").is_some());
-        assert!(props.get("content").is_some());
+        assert!(props.get("offset").is_some());
+        assert!(props.get("limit").is_some());
         let required = def.input_schema["required"].as_array().unwrap();
-        assert!(required.contains(&serde_json::json!("action")));
         assert!(required.contains(&serde_json::json!("path")));
     }
 
     #[test]
-    fn shell_def_is_valid() {
-        let def = shell_definition();
-        assert_eq!(def.name, "shell");
+    fn file_write_def_is_valid() {
+        let def = file_write_definition();
+        assert_eq!(def.name, "file-write");
+        let props = &def.input_schema["properties"];
+        assert!(props.get("path").is_some());
+        assert!(props.get("content").is_some());
+    }
+
+    #[test]
+    fn file_edit_def_is_valid() {
+        let def = file_edit_definition();
+        assert_eq!(def.name, "file-edit");
+        let props = &def.input_schema["properties"];
+        assert!(props.get("path").is_some());
+        assert!(props.get("old_string").is_some());
+        assert!(props.get("new_string").is_some());
+    }
+
+    #[test]
+    fn glob_def_is_valid() {
+        let def = glob_definition();
+        assert_eq!(def.name, "glob");
+        let props = &def.input_schema["properties"];
+        assert!(props.get("pattern").is_some());
+    }
+
+    #[test]
+    fn grep_def_is_valid() {
+        let def = grep_definition();
+        assert_eq!(def.name, "grep");
+        let props = &def.input_schema["properties"];
+        assert!(props.get("pattern").is_some());
+        assert!(props.get("path").is_some());
+        assert!(props.get("glob_filter").is_some());
+        assert!(props.get("case_insensitive").is_some());
+    }
+
+    #[test]
+    fn command_exec_def_is_valid() {
+        let def = command_exec_definition();
+        assert_eq!(def.name, "command-exec");
         let props = &def.input_schema["properties"];
         assert!(props.get("command").is_some());
         assert!(props.get("timeout").is_some());
+        assert!(props.get("working_dir").is_some());
     }
 
     #[test]
@@ -170,19 +315,31 @@ mod tests {
 
     #[test]
     fn build_definitions_from_peer_names() {
-        let defs = build_tool_definitions(&["file-ops", "shell", "codebase-index"]);
-        assert_eq!(defs.len(), 3);
-        assert_eq!(defs[0].name, "file-ops");
-        assert_eq!(defs[1].name, "shell");
-        assert_eq!(defs[2].name, "codebase-index");
+        let defs = build_tool_definitions(&[
+            "file-read",
+            "file-write",
+            "file-edit",
+            "glob",
+            "grep",
+            "command-exec",
+            "codebase-index",
+        ]);
+        assert_eq!(defs.len(), 7);
+        assert_eq!(defs[0].name, "file-read");
+        assert_eq!(defs[1].name, "file-write");
+        assert_eq!(defs[2].name, "file-edit");
+        assert_eq!(defs[3].name, "glob");
+        assert_eq!(defs[4].name, "grep");
+        assert_eq!(defs[5].name, "command-exec");
+        assert_eq!(defs[6].name, "codebase-index");
     }
 
     #[test]
     fn build_definitions_skips_unknown() {
-        let defs = build_tool_definitions(&["file-ops", "unknown-tool", "shell"]);
+        let defs = build_tool_definitions(&["file-read", "unknown-tool", "grep"]);
         assert_eq!(defs.len(), 2);
-        assert_eq!(defs[0].name, "file-ops");
-        assert_eq!(defs[1].name, "shell");
+        assert_eq!(defs[0].name, "file-read");
+        assert_eq!(defs[1].name, "grep");
     }
 
     #[test]
@@ -198,11 +355,18 @@ mod tests {
 
     #[test]
     fn definitions_serialize_to_valid_json() {
-        let defs = build_tool_definitions(&["file-ops", "shell", "codebase-index"]);
+        let defs = build_tool_definitions(&[
+            "file-read",
+            "file-write",
+            "file-edit",
+            "glob",
+            "grep",
+            "command-exec",
+            "codebase-index",
+        ]);
         for def in &defs {
             let json = serde_json::to_string(def).unwrap();
             assert!(json.contains(&def.name));
-            // Re-parse to ensure valid JSON
             let _: serde_json::Value = serde_json::from_str(&json).unwrap();
         }
     }
@@ -224,10 +388,10 @@ mod tests {
         })
         .unwrap();
 
-        // file-ops from built-in, echo from WASM
-        let defs = build_tool_definitions_with_wasm(&["file-ops", "echo"], Some(&reg));
+        // file-read from built-in, echo from WASM
+        let defs = build_tool_definitions_with_wasm(&["file-read", "echo"], Some(&reg));
         assert_eq!(defs.len(), 2);
-        assert_eq!(defs[0].name, "file-ops");
+        assert_eq!(defs[0].name, "file-read");
         assert_eq!(defs[1].name, "echo");
     }
 

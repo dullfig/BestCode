@@ -69,22 +69,21 @@ async fn agent_tool_call_dispatch() {
 
     let pool = Arc::new(Mutex::new(pool));
     let tool_defs = vec![ToolDefinition {
-        name: "file-ops".into(),
-        description: "Read, write, or list files.".into(),
+        name: "file-read".into(),
+        description: "Read file contents with line numbers.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["read", "write", "list"]},
-                "path": {"type": "string"}
+                "path": {"type": "string", "description": "The file path to read"}
             },
-            "required": ["action", "path"]
+            "required": ["path"]
         }),
     }];
 
     let handler = CodingAgentHandler::new(
         pool,
         tool_defs,
-        "You are a coding agent. When asked to read a file, use the file-ops tool.".into(),
+        "You are a coding agent. When asked to read a file, use the file-read tool.".into(),
     );
 
     let payload = ValidatedPayload {
@@ -102,9 +101,8 @@ async fn agent_tool_call_dispatch() {
         HandlerResponse::Send { to, payload_xml } => {
             let xml = String::from_utf8(payload_xml).unwrap();
             println!("Tool call: to={to}, xml={xml}");
-            assert_eq!(to, "file-ops");
-            assert!(xml.contains("<FileOpsRequest>"));
-            assert!(xml.contains("<action>read</action>"));
+            assert_eq!(to, "file-read");
+            assert!(xml.contains("<FileReadRequest>"));
             assert!(xml.contains("main.rs"));
         }
         HandlerResponse::Reply { payload_xml } => {
@@ -128,12 +126,12 @@ async fn agent_multi_turn_tool_sequence() {
     };
 
     let pool = Arc::new(Mutex::new(pool));
-    let tool_defs = build_tool_definitions(&["file-ops"]);
+    let tool_defs = build_tool_definitions(&["file-read"]);
 
     let handler = CodingAgentHandler::new(
         pool,
         tool_defs,
-        "You are a coding agent. Use file-ops to read files when asked. After reading, summarize what you found.".into(),
+        "You are a coding agent. Use file-read to read files when asked. After reading, summarize what you found.".into(),
     );
 
     // Step 1: Send the task
@@ -153,7 +151,7 @@ async fn agent_multi_turn_tool_sequence() {
     match result1 {
         HandlerResponse::Send { to, .. } => {
             println!("Step 1 → Send to {to}");
-            assert_eq!(to, "file-ops");
+            assert_eq!(to, "file-read");
 
             // Step 2: Simulate the tool response coming back
             let tool_response = b"<ToolResponse><success>true</success><result># BestCode\n\nAn AI coding agent built on rust-pipeline.\n\n## Features\n- Zero trust pipeline\n- WAL-backed kernel\n- Capability-based security</result></ToolResponse>";
@@ -163,7 +161,7 @@ async fn agent_multi_turn_tool_sequence() {
             };
             let ctx2 = HandlerContext {
                 thread_id: "live-test-3".into(),
-                from: "file-ops".into(),
+                from: "file-read".into(),
                 own_name: "coding-agent".into(),
             };
 
@@ -216,8 +214,8 @@ fn response_with_text_and_tool_use() {
             },
             ContentBlock::ToolUse {
                 id: "toolu_forgiving".into(),
-                name: "file-ops".into(),
-                input: serde_json::json!({"action": "read", "path": "test.rs"}),
+                name: "file-read".into(),
+                input: serde_json::json!({"path": "test.rs"}),
             },
         ],
         stop_reason: Some("tool_use".into()),

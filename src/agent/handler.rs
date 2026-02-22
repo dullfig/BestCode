@@ -538,7 +538,7 @@ mod tests {
     }
 
     fn sample_tool_defs() -> Vec<ToolDefinition> {
-        crate::agent::tools::build_tool_definitions(&["file-ops", "shell"])
+        crate::agent::tools::build_tool_definitions(&["file-read", "command-exec"])
     }
 
     #[test]
@@ -617,8 +617,8 @@ mod tests {
                 },
                 ContentBlock::ToolUse {
                     id: "toolu_1".into(),
-                    name: "file-ops".into(),
-                    input: serde_json::json!({"action": "read", "path": "src/main.rs"}),
+                    name: "file-read".into(),
+                    input: serde_json::json!({"path": "src/main.rs"}),
                 },
             ],
             stop_reason: Some("tool_use".into()),
@@ -631,7 +631,7 @@ mod tests {
         match action {
             ResponseAction::ToolCalls { pending, .. } => {
                 assert_eq!(pending.len(), 1);
-                assert_eq!(pending[0].tool_name, "file-ops");
+                assert_eq!(pending[0].tool_name, "file-read");
                 assert_eq!(pending[0].tool_use_id, "toolu_1");
             }
             _ => panic!("expected ToolCalls"),
@@ -648,12 +648,12 @@ mod tests {
             content: vec![
                 ContentBlock::ToolUse {
                     id: "toolu_1".into(),
-                    name: "file-ops".into(),
-                    input: serde_json::json!({"action": "read", "path": "a.rs"}),
+                    name: "file-read".into(),
+                    input: serde_json::json!({"path": "a.rs"}),
                 },
                 ContentBlock::ToolUse {
                     id: "toolu_2".into(),
-                    name: "shell".into(),
+                    name: "command-exec".into(),
                     input: serde_json::json!({"command": "ls"}),
                 },
             ],
@@ -667,8 +667,8 @@ mod tests {
         match action {
             ResponseAction::ToolCalls { pending, .. } => {
                 assert_eq!(pending.len(), 2);
-                assert_eq!(pending[0].tool_name, "file-ops");
-                assert_eq!(pending[1].tool_name, "shell");
+                assert_eq!(pending[0].tool_name, "file-read");
+                assert_eq!(pending[1].tool_name, "command-exec");
             }
             _ => panic!("expected ToolCalls"),
         }
@@ -707,23 +707,23 @@ mod tests {
         let action = ResponseAction::ToolCalls {
             blocks: vec![ContentBlock::ToolUse {
                 id: "toolu_1".into(),
-                name: "file-ops".into(),
-                input: serde_json::json!({"action": "read", "path": "foo.rs"}),
+                name: "file-read".into(),
+                input: serde_json::json!({"path": "foo.rs"}),
             }],
             pending: vec![PendingToolCall {
                 tool_use_id: "toolu_1".into(),
-                tool_name: "file-ops".into(),
-                input: serde_json::json!({"action": "read", "path": "foo.rs"}),
+                tool_name: "file-read".into(),
+                input: serde_json::json!({"path": "foo.rs"}),
             }],
         };
 
         let result = CodingAgentHandler::dispatch_response(&mut thread, action).unwrap();
         match result {
             HandlerResponse::Send { to, payload_xml } => {
-                assert_eq!(to, "file-ops");
+                assert_eq!(to, "file-read");
                 let xml = String::from_utf8(payload_xml).unwrap();
-                assert!(xml.contains("<FileOpsRequest>"));
-                assert!(xml.contains("<action>read</action>"));
+                assert!(xml.contains("<FileReadRequest>"));
+                assert!(xml.contains("<path>foo.rs</path>"));
             }
             _ => panic!("expected Send"),
         }
@@ -755,7 +755,7 @@ mod tests {
         };
         let ctx = HandlerContext {
             thread_id: "orphan-thread".into(),
-            from: "file-ops".into(),
+            from: "file-read".into(),
             own_name: "coding-agent".into(),
         };
 
@@ -807,32 +807,32 @@ mod tests {
         use std::collections::HashMap as StdHashMap;
 
         let descriptions = vec![
-            "read write manage files on the local filesystem source code configuration",
+            "read file contents from the local filesystem source code configuration",
             "execute shell commands run programs compile code run tests",
         ];
         let provider = TfIdfProvider::from_corpus(&descriptions);
 
         let mut index = EmbeddingIndex::new(0.1);
-        index.register("file-ops", provider.embed(descriptions[0]));
-        index.register("shell", provider.embed(descriptions[1]));
+        index.register("file-read", provider.embed(descriptions[0]));
+        index.register("command-exec", provider.embed(descriptions[1]));
 
         let filler = FormFiller::new(mock_pool(), 3);
 
         let mut metadata = StdHashMap::new();
         metadata.insert(
-            "file-ops".to_string(),
+            "file-read".to_string(),
             ToolMetadata {
-                description: "File operations tool".into(),
-                xml_template: "<FileOpsRequest><action/><path/></FileOpsRequest>".into(),
-                payload_tag: "FileOpsRequest".into(),
+                description: "File read tool".into(),
+                xml_template: "<FileReadRequest><path/></FileReadRequest>".into(),
+                payload_tag: "FileReadRequest".into(),
             },
         );
         metadata.insert(
-            "shell".to_string(),
+            "command-exec".to_string(),
             ToolMetadata {
-                description: "Shell execution tool".into(),
-                xml_template: "<ShellRequest><command/></ShellRequest>".into(),
-                payload_tag: "ShellRequest".into(),
+                description: "Command execution tool".into(),
+                xml_template: "<CommandExecRequest><command/></CommandExecRequest>".into(),
+                payload_tag: "CommandExecRequest".into(),
             },
         );
 
@@ -864,8 +864,8 @@ mod tests {
             "test".into(),
         );
 
-        // The semantic router should match "read src/main.rs" to file-ops
-        let allowed = vec!["file-ops".to_string(), "shell".to_string()];
+        // The semantic router should match "read src/main.rs" to file-read
+        let allowed = vec!["file-read".to_string(), "command-exec".to_string()];
         let decision = handler
             .try_semantic_route("read the source code file at src/main.rs", &allowed)
             .await;
@@ -886,7 +886,7 @@ mod tests {
         );
         handler.set_max_routing_iterations(5);
 
-        let allowed = vec!["file-ops".to_string()];
+        let allowed = vec!["file-read".to_string()];
         // Completely unrelated text — should not match
         let _decision = handler
             .try_semantic_route("the meaning of life is to create meaning", &allowed)
@@ -912,13 +912,13 @@ mod tests {
         thread.push_assistant_blocks(vec![ContentBlock::Text {
             text: "I need to see parser.rs".into(),
         }]);
-        thread.push_user_message("<file-ops_result><content>fn main() {}</content></file-ops_result>");
+        thread.push_user_message("<file-read_result><content>fn main() {}</content></file-read_result>");
 
         // Thread should have 3 messages: user, assistant, synthetic user
         assert_eq!(thread.messages.len(), 3);
         assert_eq!(thread.messages[2].role, "user");
         let content = thread.messages[2].content.text().unwrap();
-        assert!(content.contains("file-ops_result"));
+        assert!(content.contains("file-read_result"));
     }
 
     #[tokio::test]

@@ -150,13 +150,16 @@ dependencies = [
  "clap",
  "crc32fast",
  "crossterm 0.28.1",
+ "glob",
  "memmap2",
  "ratatui",
+ "regex",
  "reqwest",
  "rust-pipeline",
  "serde",
  "serde_json",
  "serde_yaml",
+ "similar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -1142,6 +1145,12 @@ dependencies = [
  "indexmap",
  "stable_deref_trait",
 ]
+
+[[package]]
+name = "glob"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "h2"
@@ -2881,6 +2890,12 @@ dependencies = [
  "errno",
  "libc",
 ]
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "siphasher"

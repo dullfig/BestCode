@@ -48,8 +48,12 @@ pub fn xml_response_to_result(xml: &str) -> (String, bool) {
 /// Get the XML request tag name for a tool.
 pub fn xml_tag_for_tool(tool_name: &str) -> &str {
     match tool_name {
-        "file-ops" => "FileOpsRequest",
-        "shell" => "ShellRequest",
+        "file-read" => "FileReadRequest",
+        "file-write" => "FileWriteRequest",
+        "file-edit" => "FileEditRequest",
+        "glob" => "GlobRequest",
+        "grep" => "GrepRequest",
+        "command-exec" => "CommandExecRequest",
         "codebase-index" => "CodeIndexRequest",
         _ => "UnknownRequest",
     }
@@ -58,8 +62,12 @@ pub fn xml_tag_for_tool(tool_name: &str) -> &str {
 /// Get the pipeline payload tag (what the listener is registered with) for a tool.
 pub fn payload_tag_for_tool(tool_name: &str) -> &str {
     match tool_name {
-        "file-ops" => "FileOpsRequest",
-        "shell" => "ShellRequest",
+        "file-read" => "FileReadRequest",
+        "file-write" => "FileWriteRequest",
+        "file-edit" => "FileEditRequest",
+        "glob" => "GlobRequest",
+        "grep" => "GrepRequest",
+        "command-exec" => "CommandExecRequest",
         "codebase-index" => "CodeIndexRequest",
         _ => "UnknownRequest",
     }
@@ -132,28 +140,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn translate_file_ops_read() {
+    fn translate_file_read() {
         let input = serde_json::json!({
-            "action": "read",
-            "path": "src/main.rs"
+            "path": "src/main.rs",
+            "limit": 100
         });
-        let xml = tool_call_to_xml("file-ops", &input);
-        assert!(xml.starts_with("<FileOpsRequest>"));
-        assert!(xml.ends_with("</FileOpsRequest>"));
-        assert!(xml.contains("<action>read</action>"));
+        let xml = tool_call_to_xml("file-read", &input);
+        assert!(xml.starts_with("<FileReadRequest>"));
+        assert!(xml.ends_with("</FileReadRequest>"));
         assert!(xml.contains("<path>src/main.rs</path>"));
     }
 
     #[test]
-    fn translate_shell_command() {
+    fn translate_file_write() {
         let input = serde_json::json!({
-            "command": "echo hello",
-            "timeout": 5000
+            "path": "output.txt",
+            "content": "hello world"
         });
-        let xml = tool_call_to_xml("shell", &input);
-        assert!(xml.starts_with("<ShellRequest>"));
-        assert!(xml.contains("<command>echo hello</command>"));
-        assert!(xml.contains("<timeout>5000</timeout>"));
+        let xml = tool_call_to_xml("file-write", &input);
+        assert!(xml.starts_with("<FileWriteRequest>"));
+        assert!(xml.contains("<content>hello world</content>"));
+    }
+
+    #[test]
+    fn translate_file_edit() {
+        let input = serde_json::json!({
+            "path": "src/main.rs",
+            "old_string": "fn old()",
+            "new_string": "fn new()"
+        });
+        let xml = tool_call_to_xml("file-edit", &input);
+        assert!(xml.starts_with("<FileEditRequest>"));
+        assert!(xml.contains("<old_string>fn old()</old_string>"));
+        assert!(xml.contains("<new_string>fn new()</new_string>"));
+    }
+
+    #[test]
+    fn translate_glob() {
+        let input = serde_json::json!({
+            "pattern": "**/*.rs"
+        });
+        let xml = tool_call_to_xml("glob", &input);
+        assert!(xml.starts_with("<GlobRequest>"));
+        assert!(xml.contains("<pattern>**/*.rs</pattern>"));
+    }
+
+    #[test]
+    fn translate_grep() {
+        let input = serde_json::json!({
+            "pattern": "fn\\s+\\w+",
+            "path": "src/"
+        });
+        let xml = tool_call_to_xml("grep", &input);
+        assert!(xml.starts_with("<GrepRequest>"));
+    }
+
+    #[test]
+    fn translate_command_exec() {
+        let input = serde_json::json!({
+            "command": "cargo test",
+            "timeout": 60
+        });
+        let xml = tool_call_to_xml("command-exec", &input);
+        assert!(xml.starts_with("<CommandExecRequest>"));
+        assert!(xml.contains("<command>cargo test</command>"));
     }
 
     #[test]
@@ -173,7 +223,7 @@ mod tests {
         let input = serde_json::json!({
             "command": "echo '<hello>'"
         });
-        let xml = tool_call_to_xml("shell", &input);
+        let xml = tool_call_to_xml("command-exec", &input);
         assert!(xml.contains("&lt;hello&gt;"));
     }
 
@@ -210,8 +260,12 @@ mod tests {
 
     #[test]
     fn xml_tag_mapping() {
-        assert_eq!(xml_tag_for_tool("file-ops"), "FileOpsRequest");
-        assert_eq!(xml_tag_for_tool("shell"), "ShellRequest");
+        assert_eq!(xml_tag_for_tool("file-read"), "FileReadRequest");
+        assert_eq!(xml_tag_for_tool("file-write"), "FileWriteRequest");
+        assert_eq!(xml_tag_for_tool("file-edit"), "FileEditRequest");
+        assert_eq!(xml_tag_for_tool("glob"), "GlobRequest");
+        assert_eq!(xml_tag_for_tool("grep"), "GrepRequest");
+        assert_eq!(xml_tag_for_tool("command-exec"), "CommandExecRequest");
         assert_eq!(xml_tag_for_tool("codebase-index"), "CodeIndexRequest");
         assert_eq!(xml_tag_for_tool("other"), "UnknownRequest");
     }
