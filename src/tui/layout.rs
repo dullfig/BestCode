@@ -32,35 +32,42 @@ pub fn draw(f: &mut Frame, app: &mut TuiApp) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // menu bar
+            Constraint::Length(1), // tab bar
             Constraint::Min(5),   // content area
             Constraint::Length(3), // input (textarea)
             Constraint::Length(1), // status bar
         ])
         .split(f.area());
 
+    draw_tab_bar(f, app, outer[1]);
+
     match app.active_tab {
-        ActiveTab::Messages => draw_messages(f, app, outer[1]),
-        ActiveTab::Threads => draw_threads(f, app, outer[1]),
-        ActiveTab::Yaml => draw_yaml_placeholder(f, outer[1]),
-        ActiveTab::Wasm => draw_wasm_placeholder(f, outer[1]),
-        ActiveTab::Debug => draw_debug(f, app, outer[1]),
+        ActiveTab::Messages => draw_messages(f, app, outer[2]),
+        ActiveTab::Threads => draw_threads(f, app, outer[2]),
+        ActiveTab::Yaml => draw_yaml_placeholder(f, outer[2]),
+        ActiveTab::Wasm => draw_wasm_placeholder(f, outer[2]),
+        ActiveTab::Debug => draw_debug(f, app, outer[2]),
     }
 
-    f.render_widget(&app.input_textarea, outer[2]);
-    draw_ghost_text(f, app, outer[2]);
-    draw_status(f, app, outer[3]);
+    f.render_widget(&app.input_textarea, outer[3]);
+    draw_ghost_text(f, app, outer[3]);
+    draw_status(f, app, outer[4]);
 
-    // Menu bar rendered last — dropdowns overlay content area below.
-    // Give it the area from the menu bar row through the content area so
-    // dropdown popups have room to render.
+    // Fill the menu bar row with white background before rendering menu items.
+    f.render_widget(
+        Paragraph::new("").style(Style::default().bg(Color::White)),
+        outer[0],
+    );
+
+    // Menu bar rendered last — dropdowns overlay tab bar + content below.
     let menu_area = Rect {
         x: outer[0].x,
         y: outer[0].y,
         width: outer[0].width,
-        height: outer[0].height + outer[1].height,
+        height: outer[0].height + outer[1].height + outer[2].height,
     };
     let menu_widget = Menu::new()
-        .default_style(Style::default().fg(Color::DarkGray))
+        .default_style(Style::default().fg(Color::Black).bg(Color::White))
         .highlight(
             Style::default()
                 .fg(Color::White)
@@ -68,8 +75,42 @@ pub fn draw(f: &mut Frame, app: &mut TuiApp) {
                 .add_modifier(Modifier::BOLD),
         )
         .dropdown_width(16)
-        .dropdown_style(Style::default().bg(Color::DarkGray));
+        .dropdown_style(Style::default().fg(Color::Black).bg(Color::White));
     f.render_stateful_widget(menu_widget, menu_area, &mut app.menu_state);
+}
+
+fn draw_tab_bar(f: &mut Frame, app: &TuiApp, area: Rect) {
+    let mut tabs: Vec<(&str, ActiveTab, &str)> = vec![
+        ("Messages", ActiveTab::Messages, "1"),
+        ("Threads", ActiveTab::Threads, "2"),
+        ("YAML", ActiveTab::Yaml, "3"),
+        ("WASM", ActiveTab::Wasm, "4"),
+    ];
+    if app.debug_mode {
+        tabs.push(("Debug", ActiveTab::Debug, "5"));
+    }
+
+    let spans: Vec<Span> = tabs
+        .iter()
+        .flat_map(|(name, tab, num)| {
+            let is_active = *tab == app.active_tab;
+            let style = if is_active {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            vec![
+                Span::raw(" "),
+                Span::styled(format!("[^{num} {name}]"), style),
+            ]
+        })
+        .collect();
+
+    let line = Line::from(spans);
+    let para = Paragraph::new(line);
+    f.render_widget(para, area);
 }
 
 /// Render ghost-text autocomplete overlay after the cursor in the input bar.
