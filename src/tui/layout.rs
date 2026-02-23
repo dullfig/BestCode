@@ -12,7 +12,7 @@
 //! └─────────────────────────────────────────────────┘
 //! ```
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -28,14 +28,16 @@ use super::dashboard;
 
 /// Draw the full TUI layout.
 pub fn draw(f: &mut Frame, app: &mut TuiApp) {
+    // YAML tab: hide input bar, give all space to editor
+    let input_height = if app.active_tab == ActiveTab::Yaml { 0 } else { 3 };
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // menu bar
-            Constraint::Length(1), // tab bar
-            Constraint::Min(5),   // content area
-            Constraint::Length(3), // input (textarea)
-            Constraint::Length(1), // status bar
+            Constraint::Length(1),            // menu bar
+            Constraint::Length(1),            // tab bar
+            Constraint::Min(5),              // content area
+            Constraint::Length(input_height), // input (textarea) — hidden on YAML tab
+            Constraint::Length(1),            // status bar
         ])
         .split(f.area());
 
@@ -44,13 +46,16 @@ pub fn draw(f: &mut Frame, app: &mut TuiApp) {
     match app.active_tab {
         ActiveTab::Messages => draw_messages(f, app, outer[2]),
         ActiveTab::Threads => draw_threads(f, app, outer[2]),
-        ActiveTab::Yaml => draw_yaml_placeholder(f, outer[2]),
+        ActiveTab::Yaml => draw_yaml_editor(f, app, outer[2]),
         ActiveTab::Wasm => draw_wasm_placeholder(f, outer[2]),
         ActiveTab::Debug => draw_debug(f, app, outer[2]),
     }
 
-    f.render_widget(&app.input_textarea, outer[3]);
-    draw_ghost_text(f, app, outer[3]);
+    if input_height > 0 {
+        f.render_widget(&app.input_textarea, outer[3]);
+        draw_ghost_text(f, app, outer[3]);
+        draw_command_popup(f, app, outer[3]);
+    }
     draw_status(f, app, outer[4]);
 
     // Fill the menu bar row with white background before rendering menu items.
@@ -131,6 +136,68 @@ fn draw_tab_bar(f: &mut Frame, app: &TuiApp, area: Rect) {
     let line = Line::from(spans);
     let para = Paragraph::new(line);
     f.render_widget(para, area);
+}
+
+/// Render command popup above the input bar when typing `/`.
+fn draw_command_popup(f: &mut Frame, app: &TuiApp, input_area: Rect) {
+    let input = app.input_textarea.lines().first().cloned().unwrap_or_default();
+    if !input.starts_with('/') || input.contains(' ') {
+        return;
+    }
+
+    let matches = super::commands::matching_commands(&input);
+    if matches.is_empty() {
+        return;
+    }
+
+    // Popup dimensions
+    let popup_width = 44u16.min(input_area.width);
+    let popup_height = (matches.len() as u16 + 2).min(10); // +2 for borders
+    let popup_x = input_area.x;
+    let popup_y = input_area.y.saturating_sub(popup_height);
+
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    // Clear background
+    f.render_widget(
+        Paragraph::new("").style(Style::default().bg(Color::Black)),
+        popup_area,
+    );
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(Color::Black));
+
+    let selected = app.command_popup_index;
+    let items: Vec<Line> = matches
+        .iter()
+        .enumerate()
+        .map(|(i, cmd)| {
+            let arg_hint = if cmd.has_arg { " <arg>" } else { "" };
+            let is_selected = i == selected;
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let desc_style = if is_selected {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            Line::from(vec![
+                Span::styled(format!("{}{}", cmd.name, arg_hint), style),
+                Span::styled(format!("  {}", cmd.description), desc_style),
+            ])
+        })
+        .collect();
+
+    let para = Paragraph::new(items).block(block);
+    f.render_widget(para, popup_area);
 }
 
 /// Render ghost-text autocomplete overlay after the cursor in the input bar.
@@ -460,17 +527,45 @@ fn draw_messages(f: &mut Frame, app: &mut TuiApp, area: Rect) {
     }
 }
 
-fn draw_yaml_placeholder(f: &mut Frame, area: Rect) {
-    let block = Block::default()
-        .title(" YAML ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-    let para = Paragraph::new(Span::styled(
-        "Coming soon — organism YAML editor",
-        Style::default().fg(Color::DarkGray),
-    ))
-    .block(block);
-    f.render_widget(para, area);
+fn draw_yaml_editor(f: &mut Frame, app: &mut TuiApp, area: Rect) {
+    if let Some(ref editor) = app.yaml_editor {
+        // Cache area for input routing (editor.input() needs the render Rect)
+        app.yaml_area = area;
+        f.render_widget(editor, area);
+        // Position cursor within the editor
+        if let Some((x, y)) = editor.get_visible_cursor(&area) {
+            f.set_cursor_position(Position::new(x, y));
+        }
+        // Show validation status in the bottom-right of the area
+        if let Some(ref status) = app.yaml_status {
+            let msg = if status.len() > (area.width as usize).saturating_sub(4) {
+                &status[..area.width as usize - 4]
+            } else {
+                status.as_str()
+            };
+            let status_area = Rect::new(
+                area.x + 1,
+                area.y + area.height.saturating_sub(1),
+                area.width.saturating_sub(2),
+                1,
+            );
+            f.render_widget(
+                Paragraph::new(Span::styled(msg, Style::default().fg(Color::Red))),
+                status_area,
+            );
+        }
+    } else {
+        let block = Block::default()
+            .title(" YAML ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+        let para = Paragraph::new(Span::styled(
+            "No organism YAML loaded. Use --organism or load from File menu.",
+            Style::default().fg(Color::DarkGray),
+        ))
+        .block(block);
+        f.render_widget(para, area);
+    }
 }
 
 fn draw_wasm_placeholder(f: &mut Frame, area: Rect) {

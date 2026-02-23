@@ -4,6 +4,7 @@
 //! View reads state to produce ratatui widgets. No side effects in view.
 
 use std::sync::Arc;
+use ratatui::layout::Rect;
 use tokio::sync::Mutex;
 use tui_menu::{MenuItem, MenuState};
 
@@ -231,6 +232,14 @@ pub struct TuiApp {
     pub menu_state: MenuState<MenuAction>,
     /// Whether the menu bar has keyboard focus (dropdowns visible).
     pub menu_active: bool,
+    /// Command palette selection index (for `/` popup).
+    pub command_popup_index: usize,
+    /// YAML editor widget (ratatui-code-editor). None until organism YAML loaded.
+    pub yaml_editor: Option<ratatui_code_editor::editor::Editor>,
+    /// YAML validation status. None = valid/untouched, Some(msg) = parse error.
+    pub yaml_status: Option<String>,
+    /// Cached YAML content area from last render (needed for editor.input()).
+    pub yaml_area: Rect,
 }
 
 /// Current time in seconds since Unix epoch.
@@ -330,12 +339,68 @@ impl TuiApp {
             debug_mode: false,
             menu_state: MenuState::new(build_menu_items(false)),
             menu_active: false,
+            command_popup_index: 0,
+            yaml_editor: None,
+            yaml_status: None,
+            yaml_area: Rect::default(),
         }
     }
 
     /// Rebuild the menu item tree (e.g., after toggling debug mode).
     pub fn rebuild_menu(&mut self) {
         self.menu_state = MenuState::new(build_menu_items(self.debug_mode));
+    }
+
+    /// High-contrast theme tuned for YAML readability on dark terminals.
+    fn yaml_theme() -> Vec<(&'static str, &'static str)> {
+        vec![
+            // Keys — cyan, stands out as structure
+            ("identifier", "#00DDDD"),
+            // String values — green
+            ("string", "#66DD66"),
+            ("string.escape", "#DDDD00"),
+            // Numbers — orange
+            ("number", "#FFAA44"),
+            ("integer", "#FFAA44"),
+            ("float", "#FFAA44"),
+            // Booleans — magenta
+            ("boolean", "#DD77DD"),
+            // Null — dim magenta
+            ("constant.builtin", "#AA55AA"),
+            // Comments — dim gray
+            ("comment", "#666666"),
+            // Punctuation (: - , > | ?) — white, subtle
+            ("punctuation.delimiter", "#AAAAAA"),
+            // Brackets ([] {}) — white
+            ("punctuation.bracket", "#CCCCCC"),
+            // Anchors & aliases — yellow
+            ("type", "#DDDD00"),
+            // Directives — dim cyan
+            ("preproc", "#55AAAA"),
+            // Errors — bright red
+            ("error", "#FF4444"),
+            // Fallbacks for other languages if theme reused
+            ("keyword", "#00DDDD"),
+            ("function", "#FFAA44"),
+            ("variable", "#FFFFFF"),
+            ("variable.builtin", "#FFFFFF"),
+            ("namespace", "#FFAA44"),
+            ("type.builtin", "#FFAA44"),
+        ]
+    }
+
+    /// Load content into the YAML editor with syntax highlighting.
+    pub fn load_yaml_editor(&mut self, content: &str) {
+        match ratatui_code_editor::editor::Editor::new("yaml", content, Self::yaml_theme()) {
+            Ok(editor) => {
+                self.yaml_editor = Some(editor);
+                self.yaml_status = None;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create YAML editor: {e}");
+                self.yaml_editor = None;
+            }
+        }
     }
 
     /// Handle a TUI message (TEA update).
@@ -532,6 +597,7 @@ mod tests {
     use crate::kernel::context_store::{ContextInventory, SegmentMeta, SegmentStatus};
     use crate::kernel::thread_table::ThreadRecord;
     use crate::pipeline::events::PipelineEvent;
+    use crate::tui::input::handle_key;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
@@ -930,5 +996,86 @@ mod tests {
             KeyModifiers::NONE,
         )));
         assert!(app.activity_auto_scroll);
+    }
+
+    // ── YAML editor tests ──
+
+    #[test]
+    fn yaml_editor_loads_content() {
+        let mut app = TuiApp::new();
+        assert!(app.yaml_editor.is_none());
+
+        app.load_yaml_editor("key: value\n");
+        assert!(app.yaml_editor.is_some());
+        assert!(app.yaml_status.is_none());
+
+        let content = app.yaml_editor.as_ref().unwrap().get_content();
+        assert_eq!(content, "key: value\n");
+    }
+
+    #[test]
+    fn yaml_ctrl_s_validates_good() {
+        let mut app = TuiApp::new();
+        app.load_yaml_editor("organism:\n  name: test\n");
+        app.active_tab = ActiveTab::Yaml;
+
+        // Ctrl+S triggers validation
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
+
+        // Valid YAML → no error status, success message in chat log
+        assert!(app.yaml_status.is_none());
+        assert!(app.chat_log.iter().any(|e| e.text.contains("validated")));
+    }
+
+    #[test]
+    fn yaml_ctrl_s_validates_bad() {
+        let mut app = TuiApp::new();
+        app.load_yaml_editor("key: [invalid\n");
+        app.active_tab = ActiveTab::Yaml;
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
+
+        // Invalid YAML → error status set
+        assert!(app.yaml_status.is_some());
+    }
+
+    #[test]
+    fn yaml_tab_receives_keys() {
+        let mut app = TuiApp::new();
+        app.load_yaml_editor("hello");
+        app.active_tab = ActiveTab::Yaml;
+        app.yaml_area = Rect::new(0, 0, 80, 24);
+
+        // Type a character — should go to editor, not textarea
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+
+        let content = app.yaml_editor.as_ref().unwrap().get_content();
+        assert!(content.contains('x'));
+        // Textarea should NOT have received the 'x'
+        assert_eq!(app.input_textarea.lines(), [""]);
+    }
+
+    #[test]
+    fn yaml_esc_clears_status() {
+        let mut app = TuiApp::new();
+        app.load_yaml_editor("bad: [yaml\n");
+        app.active_tab = ActiveTab::Yaml;
+        app.yaml_status = Some("parse error".into());
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+
+        assert!(app.yaml_status.is_none());
     }
 }

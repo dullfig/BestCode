@@ -82,7 +82,7 @@ async fn inject_task(pipeline: &AgentPipeline, kernel: &Arc<Mutex<Kernel>>, task
 }
 
 /// Run the TUI main loop. Blocks until quit.
-pub async fn run_tui(pipeline: &AgentPipeline, debug: bool) -> anyhow::Result<()> {
+pub async fn run_tui(pipeline: &AgentPipeline, debug: bool, organism_yaml: &str) -> anyhow::Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
@@ -92,6 +92,7 @@ pub async fn run_tui(pipeline: &AgentPipeline, debug: bool) -> anyhow::Result<()
     let mut app = TuiApp::new();
     app.debug_mode = debug;
     app.llm_pool = pipeline.llm_pool();
+    app.load_yaml_editor(organism_yaml);
     let kernel = pipeline.kernel();
     let mut event_rx = pipeline.subscribe();
 

@@ -222,7 +222,7 @@ async fn main() -> Result<()> {
     pipeline.run();
 
     // Run TUI (blocks until quit)
-    run_tui(&pipeline, debug).await?;
+    run_tui(&pipeline, debug, &yaml).await?;
 
     // Shutdown
     info!("Shutting down");

@@ -172,6 +172,111 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) {
         }
     }
 
+    // YAML tab: route keys to code editor when active
+    if app.active_tab == ActiveTab::Yaml {
+        if let Some(ref mut editor) = app.yaml_editor {
+            match key.code {
+                // Ctrl+S validates YAML
+                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let content = editor.get_content();
+                    match serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                        Ok(_) => {
+                            app.yaml_status = None;
+                            app.chat_log.push(ChatEntry {
+                                role: "system".into(),
+                                text: "YAML validated successfully.".into(),
+                            });
+                            app.message_auto_scroll = true;
+                        }
+                        Err(e) => {
+                            app.yaml_status = Some(format!("{e}"));
+                        }
+                    }
+                }
+                // Esc on YAML tab clears validation status (if any), else standard behavior
+                KeyCode::Esc => {
+                    if app.yaml_status.is_some() {
+                        app.yaml_status = None;
+                    } else {
+                        app.input_textarea.select_all();
+                        app.input_textarea.cut();
+                    }
+                }
+                // Everything else goes to the code editor
+                _ => {
+                    let area = app.yaml_area;
+                    let _ = editor.input(key, &area);
+                }
+            }
+            return;
+        }
+    }
+
+    // Command popup: when input starts with `/` (no space), intercept navigation keys
+    {
+        let input = current_input(app);
+        let popup_active = input.starts_with('/') && !input.contains(' ');
+        if popup_active {
+            let matches = commands::matching_commands(&input);
+            if !matches.is_empty() {
+                match key.code {
+                    KeyCode::Up => {
+                        if app.command_popup_index > 0 {
+                            app.command_popup_index -= 1;
+                        }
+                        return;
+                    }
+                    KeyCode::Down => {
+                        if app.command_popup_index + 1 < matches.len() {
+                            app.command_popup_index += 1;
+                        }
+                        return;
+                    }
+                    KeyCode::Tab => {
+                        if let Some(cmd) = matches.get(app.command_popup_index) {
+                            let mut completion = cmd.name.to_string();
+                            if cmd.has_arg {
+                                completion.push(' ');
+                            }
+                            set_input(app, &completion);
+                            app.command_popup_index = 0;
+                        }
+                        return;
+                    }
+                    KeyCode::Enter => {
+                        if let Some(cmd) = matches.get(app.command_popup_index) {
+                            if cmd.has_arg {
+                                // Command needs args — autocomplete with trailing space
+                                let mut completion = cmd.name.to_string();
+                                completion.push(' ');
+                                set_input(app, &completion);
+                                app.command_popup_index = 0;
+                                return;
+                            }
+                            // No args needed — fill and fall through to submit
+                            set_input(app, cmd.name);
+                            app.command_popup_index = 0;
+                            // Don't return — let the Enter handler below submit it
+                        }
+                    }
+                    KeyCode::Esc => {
+                        app.input_textarea.select_all();
+                        app.input_textarea.cut();
+                        app.command_popup_index = 0;
+                        return;
+                    }
+                    _ => {
+                        // Typing continues — reset selection to top, fall through
+                        app.command_popup_index = 0;
+                    }
+                }
+            }
+        } else {
+            // No popup — reset index
+            app.command_popup_index = 0;
+        }
+    }
+
     match key.code {
         // Submit task or slash command
         KeyCode::Enter => {
@@ -197,7 +302,7 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) {
                 }
             }
         }
-        // Tab: on Threads tab cycles sub-pane focus; otherwise autocomplete slash commands
+        // Tab: focus cycling on Threads tab, otherwise forward to textarea
         KeyCode::Tab => {
             if app.active_tab == ActiveTab::Threads {
                 app.threads_focus = match app.threads_focus {
@@ -205,20 +310,9 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) {
                     ThreadsFocus::ContextTree => ThreadsFocus::ThreadList,
                 };
             } else {
-                let input = current_input(app);
-                if input.starts_with('/') && !input.contains(' ') {
-                    if let Some(cmd) = commands::suggest(&input) {
-                        let mut completion = cmd.name.to_string();
-                        if cmd.has_arg {
-                            completion.push(' ');
-                        }
-                        set_input(app, &completion);
-                    }
-                } else {
-                    // Normal Tab → forward to textarea
-                    app.input_textarea
-                        .input(crossterm::event::Event::Key(key));
-                }
+                // Normal Tab → forward to textarea
+                app.input_textarea
+                    .input(crossterm::event::Event::Key(key));
             }
         }
         // Clear input

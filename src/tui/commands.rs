@@ -47,6 +47,24 @@ pub static COMMANDS: &[SlashCommand] = &[
     },
 ];
 
+/// Return all commands whose name or alias prefix-matches the input.
+/// Used by the command popup to show filtered choices.
+pub fn matching_commands(input: &str) -> Vec<&'static SlashCommand> {
+    if !input.starts_with('/') {
+        return Vec::new();
+    }
+    let cmd_part = input.split_whitespace().next().unwrap_or(input);
+    let mut results = Vec::new();
+    for cmd in COMMANDS {
+        if cmd.name.starts_with(cmd_part)
+            || cmd.aliases.iter().any(|a| a.starts_with(cmd_part))
+        {
+            results.push(cmd);
+        }
+    }
+    results
+}
+
 /// Find the best prefix-matching command for the given input.
 /// Input must start with `/`. Returns None if no match.
 pub fn suggest(input: &str) -> Option<&'static SlashCommand> {
