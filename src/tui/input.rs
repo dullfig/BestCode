@@ -48,6 +48,7 @@ fn dispatch_menu_action(app: &mut TuiApp, action: MenuAction) {
                 text: concat!(
                     "Keyboard shortcuts:\n",
                     "  F10         Open/close menu bar\n",
+                    "  Alt+F/V/M/H Open File/View/Model/Help menu\n",
                     "  Ctrl+1..5   Switch tabs\n",
                     "  Tab         Cycle focus (Threads) / autocomplete (/commands)\n",
                     "  Enter       Submit task or confirm\n",
@@ -98,6 +99,27 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) {
             app.menu_active = true;
         }
         return;
+    }
+
+    // Alt+letter opens a specific menu group (Windows-style accelerators)
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        let menu_index = match key.code {
+            KeyCode::Char('f') => Some(0), // File
+            KeyCode::Char('v') => Some(1), // View
+            KeyCode::Char('m') => Some(2), // Model
+            KeyCode::Char('h') => Some(3), // Help
+            _ => None,
+        };
+        if let Some(index) = menu_index {
+            app.menu_state.reset();
+            app.menu_state.activate(); // highlights first group (File)
+            for _ in 0..index {
+                app.menu_state.right(); // navigate to the target group
+            }
+            app.menu_state.down(); // open the dropdown
+            app.menu_active = true;
+            return;
+        }
     }
 
     // When menu is active, route keys to menu navigation

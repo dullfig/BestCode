@@ -77,6 +77,26 @@ pub fn draw(f: &mut Frame, app: &mut TuiApp) {
         .dropdown_width(16)
         .dropdown_style(Style::default().fg(Color::Black).bg(Color::White));
     f.render_stateful_widget(menu_widget, menu_area, &mut app.menu_state);
+
+    // Underline accelerator letters (F, V, M, H) by overwriting specific cells.
+    // tui-menu renders items as: " " + " File " + " View " + " Model " + " Help "
+    // so each accelerator letter is at: initial_space + leading_space + cumulative widths.
+    let accel_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::White)
+        .add_modifier(Modifier::UNDERLINED);
+    let names = ["File", "View", "Model", "Help"];
+    let accels = ['F', 'V', 'M', 'H'];
+    let mut x = outer[0].x + 1; // skip initial " "
+    for (i, name) in names.iter().enumerate() {
+        x += 1; // leading space of " name "
+        let cell = Rect::new(x, outer[0].y, 1, 1);
+        f.render_widget(
+            Paragraph::new(Span::styled(accels[i].to_string(), accel_style)),
+            cell,
+        );
+        x += name.len() as u16 + 1; // rest of name + trailing space
+    }
 }
 
 fn draw_tab_bar(f: &mut Frame, app: &TuiApp, area: Rect) {
