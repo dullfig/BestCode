@@ -8,6 +8,7 @@
 //! The TUI wires buffer changes to the service and renders results
 //! (marks for errors, popup for completions, overlay for hover).
 
+pub mod command_line;
 pub mod organism;
 
 use lsp_types::{CompletionItem, Diagnostic, Position};

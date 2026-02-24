@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::Parser;
 use tracing::info;
 
+use bestcode::config::ModelsConfig;
 use bestcode::llm::LlmPool;
 use bestcode::organism::parser::parse_organism;
 use bestcode::pipeline::AgentPipelineBuilder;
@@ -125,7 +126,7 @@ struct Cli {
     #[arg(short, long)]
     dir: Option<String>,
 
-    /// Model to use (default: claude-sonnet-4-20250514)
+    /// Model to use (default: sonnet → claude-sonnet-4-6)
     #[arg(short, long)]
     model: Option<String>,
 
@@ -150,7 +151,7 @@ async fn main() -> Result<()> {
     let work_dir = cli.dir.unwrap_or_else(|| ".".into());
     let model = cli
         .model
-        .unwrap_or_else(|| "claude-sonnet-4-20250514".into());
+        .unwrap_or_else(|| "sonnet".into());
     let data_rel = cli.data.unwrap_or_else(|| ".bestcode".into());
     let data_dir = PathBuf::from(&work_dir).join(&data_rel);
 
@@ -180,17 +181,47 @@ async fn main() -> Result<()> {
     };
     let org = parse_organism(&yaml).to_anyhow()?;
 
-    // Create LLM pool from environment
-    let pool = LlmPool::from_env(&model).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Load models config (user + project + env fallback)
+    let models_config = ModelsConfig::load();
+
+    // Create LLM pool: config first, env var fallback. None = no key yet (user configures via TUI).
+    let pool = if models_config.has_models() {
+        match LlmPool::from_config(&models_config) {
+            Ok(p) => {
+                info!("Using models from config file");
+                Some(p)
+            }
+            Err(e) => {
+                info!("Config exists but pool creation failed: {e}");
+                None
+            }
+        }
+    } else {
+        match LlmPool::from_env(&model) {
+            Ok(p) => {
+                info!("Using ANTHROPIC_API_KEY from env");
+                Some(p)
+            }
+            Err(e) => {
+                info!("No API key available: {e}");
+                None
+            }
+        }
+    };
 
     info!("Building pipeline with model {model}");
 
-    // Build pipeline
-    let mut pipeline = AgentPipelineBuilder::new(org, &data_dir)
-        .with_llm_pool(pool)
-        .to_anyhow()?
-        .with_librarian()
-        .to_anyhow()?
+    // Build pipeline — LLM pool is optional (user may configure via TUI)
+    let has_pool = pool.is_some();
+    let mut builder = AgentPipelineBuilder::new(org, &data_dir);
+    if let Some(p) = pool {
+        builder = builder
+            .with_llm_pool(p)
+            .to_anyhow()?
+            .with_librarian()
+            .to_anyhow()?;
+    }
+    let mut pipeline = builder
         .with_code_index()
         .to_anyhow()?
         .register("file-read", FileReadTool)
@@ -204,11 +235,11 @@ async fn main() -> Result<()> {
         .register("grep", GrepTool)
         .to_anyhow()?
         .register("command-exec", CommandExecTool::new())
-        .to_anyhow()?
-        .with_agents()
-        .to_anyhow()?
-        .build()
         .to_anyhow()?;
+    if has_pool {
+        pipeline = pipeline.with_agents().to_anyhow()?;
+    }
+    let mut pipeline = pipeline.build().to_anyhow()?;
 
     // Initialize root thread
     pipeline
@@ -222,7 +253,7 @@ async fn main() -> Result<()> {
     pipeline.run();
 
     // Run TUI (blocks until quit)
-    run_tui(&pipeline, debug, &yaml).await?;
+    run_tui(&pipeline, debug, &yaml, models_config, has_pool).await?;
 
     // Shutdown
     info!("Shutting down");

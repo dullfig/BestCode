@@ -82,7 +82,7 @@ async fn inject_task(pipeline: &AgentPipeline, kernel: &Arc<Mutex<Kernel>>, task
 }
 
 /// Run the TUI main loop. Blocks until quit.
-pub async fn run_tui(pipeline: &AgentPipeline, debug: bool, organism_yaml: &str) -> anyhow::Result<()> {
+pub async fn run_tui(pipeline: &AgentPipeline, debug: bool, organism_yaml: &str, models_config: crate::config::ModelsConfig, has_pool: bool) -> anyhow::Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
@@ -92,7 +92,16 @@ pub async fn run_tui(pipeline: &AgentPipeline, debug: bool, organism_yaml: &str)
     let mut app = TuiApp::new();
     app.debug_mode = debug;
     app.llm_pool = pipeline.llm_pool();
+    app.models_config = std::sync::Arc::new(tokio::sync::Mutex::new(models_config));
     app.load_yaml_editor(organism_yaml);
+
+    // If no LLM pool at boot, show a helpful welcome message
+    if !has_pool {
+        super::commands::push_feedback(
+            &mut app,
+            "No API key configured. Use /models add <provider> to set up a model.\nExample: /models add anthropic",
+        );
+    }
     let kernel = pipeline.kernel();
     let mut event_rx = pipeline.subscribe();
 
@@ -157,6 +166,50 @@ pub async fn run_tui(pipeline: &AgentPipeline, debug: bool, organism_yaml: &str)
             }
         }
 
+        // Check for pending wizard completion (set by wizard Enter on BaseUrl step)
+        if let Some(wc) = app.pending_wizard_completion.take() {
+            let config_arc = app.models_config.clone();
+            let mut config = config_arc.lock().await;
+            config.add_model(&wc.provider, &wc.alias, &wc.model_id, wc.api_key, wc.base_url);
+            let _ = config.save();
+            // Rebuild or create pool from updated config
+            let pool_msg = rebuild_pool(&mut app, &config);
+            drop(config);
+            super::commands::push_feedback(
+                &mut app,
+                &format!("Added {} ({}: {}){}", wc.alias, wc.provider, wc.model_id, pool_msg),
+            );
+        }
+
+        // Check for pending update completion
+        if let Some(uc) = app.pending_update_completion.take() {
+            let config_arc = app.models_config.clone();
+            let mut config = config_arc.lock().await;
+            let feedback = if let Some(provider) = config.providers.get_mut(&uc.provider) {
+                let mut changed = Vec::new();
+                if let Some(key) = uc.api_key {
+                    provider.api_key = Some(key);
+                    changed.push("API key");
+                }
+                if let Some(url) = uc.base_url {
+                    provider.base_url = Some(url);
+                    changed.push("base URL");
+                }
+                let _ = config.save();
+                if changed.is_empty() {
+                    format!("No changes to provider '{}'.", uc.provider)
+                } else {
+                    // Rebuild pool with new credentials
+                    let pool_msg = rebuild_pool(&mut app, &config);
+                    format!("Updated {} for provider '{}'{}", changed.join(" and "), uc.provider, pool_msg)
+                }
+            } else {
+                format!("Unknown provider: {}", uc.provider)
+            };
+            drop(config);
+            super::commands::push_feedback(&mut app, &feedback);
+        }
+
         // Check for pending task submission (set by input handler on Enter)
         if let Some(task) = app.pending_task.take() {
             inject_task(pipeline, &kernel, &task).await;
@@ -171,6 +224,34 @@ pub async fn run_tui(pipeline: &AgentPipeline, debug: bool, organism_yaml: &str)
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
     Ok(())
+}
+
+/// Rebuild or create the LlmPool from updated config.
+/// If a pool exists, rebuilds it in-place. If not, creates a new one.
+/// Returns a suffix message for user feedback (e.g., " — pool connected").
+fn rebuild_pool(app: &mut TuiApp, config: &crate::config::ModelsConfig) -> String {
+    use crate::llm::LlmPool;
+
+    if let Some(ref pool_arc) = app.llm_pool {
+        // Pool exists — rebuild in place
+        match pool_arc.try_lock() {
+            Ok(mut pool) => match pool.rebuild_from_config(config) {
+                Ok(()) => format!("\nPool reloaded (model: {})", pool.default_model()),
+                Err(e) => format!("\nWarning: pool rebuild failed: {e}"),
+            },
+            Err(_) => "\nWarning: pool is busy, changes will apply on next request".into(),
+        }
+    } else {
+        // No pool yet — create one
+        match LlmPool::from_config(config) {
+            Ok(pool) => {
+                let model = pool.default_model().to_string();
+                app.llm_pool = Some(std::sync::Arc::new(tokio::sync::Mutex::new(pool)));
+                format!("\nPool connected (model: {model})")
+            }
+            Err(e) => format!("\nWarning: could not create pool: {e}"),
+        }
+    }
 }
 
 #[cfg(test)]

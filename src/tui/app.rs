@@ -8,10 +8,12 @@ use ratatui::layout::Rect;
 use tokio::sync::Mutex;
 use tui_menu::{MenuItem, MenuState};
 
+use crate::config::ModelsConfig;
 use crate::kernel::context_store::{ContextInventory, SegmentMeta, SegmentStatus};
 use crate::kernel::journal::JournalEntry;
 use crate::kernel::thread_table::ThreadRecord;
 use crate::llm::LlmPool;
+use crate::lsp::command_line::CommandLineService;
 use crate::lsp::organism::OrganismYamlService;
 use crate::lsp::{HoverInfo, LanguageService};
 use crate::pipeline::events::PipelineEvent;
@@ -32,6 +34,7 @@ pub enum ActiveTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadsFocus {
     ThreadList,
+    Conversation,
     ContextTree,
 }
 
@@ -53,6 +56,80 @@ pub enum AgentStatus {
     Thinking,
     ToolCall(String),
     Error(String),
+}
+
+/// Current input mode (normal or wizard).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputMode {
+    Normal,
+    ModelAddWizard {
+        provider: String,
+        step: WizardStep,
+        alias: Option<String>,
+        model_id: Option<String>,
+        api_key: Option<String>,
+    },
+    ModelUpdateWizard {
+        provider: String,
+        step: UpdateStep,
+        api_key: Option<String>,
+    },
+}
+
+/// Steps in the /models add wizard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WizardStep {
+    Alias,
+    ModelId,
+    ApiKey,
+    BaseUrl,
+}
+
+impl WizardStep {
+    /// Human-readable prompt for the current step.
+    pub fn prompt(&self) -> &'static str {
+        match self {
+            WizardStep::Alias => "Alias",
+            WizardStep::ModelId => "Model ID",
+            WizardStep::ApiKey => "API key",
+            WizardStep::BaseUrl => "Base URL (Enter to skip)",
+        }
+    }
+}
+
+/// Steps in the /models update wizard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateStep {
+    ApiKey,
+    BaseUrl,
+}
+
+impl UpdateStep {
+    /// Human-readable prompt for the current step.
+    pub fn prompt(&self) -> &'static str {
+        match self {
+            UpdateStep::ApiKey => "New API key (Enter to keep current)",
+            UpdateStep::BaseUrl => "New base URL (Enter to keep current)",
+        }
+    }
+}
+
+/// Pending wizard completion data (consumed by runner after handle_key).
+#[derive(Debug, Clone)]
+pub struct WizardCompletion {
+    pub provider: String,
+    pub alias: String,
+    pub model_id: String,
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+}
+
+/// Pending update wizard completion data.
+#[derive(Debug, Clone)]
+pub struct UpdateCompletion {
+    pub provider: String,
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
 }
 
 /// Lightweight view of a thread record (no kernel lifetime).
@@ -222,6 +299,14 @@ pub struct TuiApp {
     pub activity_auto_scroll: bool,
     /// Viewport height of the activity trace pane (set by renderer).
     pub activity_viewport_height: u16,
+    /// Per-thread conversation entries (populated by ConversationSync events).
+    pub thread_conversations: std::collections::HashMap<String, Vec<crate::pipeline::events::ConversationEntry>>,
+    /// Scroll offset for the conversation pane (Threads tab).
+    pub conversation_scroll: u16,
+    /// When true, auto-scroll conversation to bottom on next render.
+    pub conversation_auto_scroll: bool,
+    /// Viewport height of the conversation pane (set by renderer).
+    pub conversation_viewport_height: u16,
     /// LLM pool handle (for `/model` command).
     pub llm_pool: Option<Arc<Mutex<LlmPool>>>,
     /// Command pending async execution (set by input handler on Enter with `/`).
@@ -238,6 +323,8 @@ pub struct TuiApp {
     pub menu_active: bool,
     /// Command palette selection index (for `/` popup).
     pub command_popup_index: usize,
+    /// Language service for command-line input (slash commands).
+    pub cmd_service: CommandLineService,
     /// YAML editor widget (ratatui-code-editor). None until organism YAML loaded.
     pub yaml_editor: Option<ratatui_code_editor::editor::Editor>,
     /// YAML validation status. None = valid/untouched, Some(msg) = parse error.
@@ -260,6 +347,14 @@ pub struct TuiApp {
     pub diag_debounce: u8,
     /// Diagnostic summary for status bar ("3 errors, 1 warning").
     pub diag_summary: String,
+    /// Current input mode (normal typing vs wizard).
+    pub input_mode: InputMode,
+    /// Models configuration (shared with commands for mutation).
+    pub models_config: Arc<Mutex<ModelsConfig>>,
+    /// Pending wizard completion (set by wizard Enter on last step, consumed by runner).
+    pub pending_wizard_completion: Option<WizardCompletion>,
+    /// Pending update wizard completion (set by update wizard, consumed by runner).
+    pub pending_update_completion: Option<UpdateCompletion>,
 }
 
 /// Current time in seconds since Unix epoch.
@@ -345,6 +440,10 @@ impl TuiApp {
             activity_scroll: 0,
             activity_auto_scroll: true,
             activity_viewport_height: 20,
+            thread_conversations: std::collections::HashMap::new(),
+            conversation_scroll: 0,
+            conversation_auto_scroll: true,
+            conversation_viewport_height: 20,
             llm_pool: None,
             pending_command: None,
             threads_focus: ThreadsFocus::ThreadList,
@@ -353,6 +452,7 @@ impl TuiApp {
             menu_state: MenuState::new(build_menu_items(false)),
             menu_active: false,
             command_popup_index: 0,
+            cmd_service: CommandLineService::new(),
             yaml_editor: None,
             yaml_status: None,
             yaml_area: Rect::default(),
@@ -364,6 +464,10 @@ impl TuiApp {
             hover_info: None,
             diag_debounce: 0,
             diag_summary: String::new(),
+            input_mode: InputMode::Normal,
+            models_config: Arc::new(Mutex::new(ModelsConfig::default())),
+            pending_wizard_completion: None,
+            pending_update_completion: None,
         }
     }
 
@@ -636,6 +740,13 @@ impl TuiApp {
             } => {
                 self.complete_activity(tool_name, *success, detail);
             }
+            PipelineEvent::ConversationSync {
+                thread_id, entries, ..
+            } => {
+                self.thread_conversations
+                    .insert(thread_id.clone(), entries.clone());
+                self.conversation_auto_scroll = true;
+            }
             _ => {}
         }
 
@@ -712,6 +823,18 @@ impl TuiApp {
         }
     }
 
+    /// Scroll conversation pane down.
+    pub fn scroll_conversation_down(&mut self) {
+        self.conversation_auto_scroll = false;
+        self.conversation_scroll = self.conversation_scroll.saturating_add(1);
+    }
+
+    /// Scroll conversation pane up.
+    pub fn scroll_conversation_up(&mut self) {
+        self.conversation_auto_scroll = false;
+        self.conversation_scroll = self.conversation_scroll.saturating_sub(1);
+    }
+
     /// Scroll activity pane down.
     pub fn scroll_activity_down(&mut self) {
         self.activity_auto_scroll = false;
@@ -751,6 +874,81 @@ impl TuiApp {
         self.input_editor.set_content(text);
         let len = self.input_editor.get_content().chars().count();
         self.input_editor.set_cursor(len);
+    }
+
+    /// Get the list of completed wizard fields for rendering.
+    /// Returns (label, display_value) pairs.
+    pub fn wizard_completed_fields(&self) -> Vec<(&'static str, String)> {
+        match &self.input_mode {
+            InputMode::ModelAddWizard {
+                provider,
+                step,
+                alias,
+                model_id,
+                api_key,
+            } => {
+                let mut fields = Vec::new();
+                fields.push(("Provider", provider.clone()));
+                match step {
+                    WizardStep::Alias => {}
+                    WizardStep::ModelId => {
+                        if let Some(a) = alias {
+                            fields.push(("Alias", a.clone()));
+                        }
+                    }
+                    WizardStep::ApiKey => {
+                        if let Some(a) = alias {
+                            fields.push(("Alias", a.clone()));
+                        }
+                        if let Some(m) = model_id {
+                            fields.push(("Model ID", m.clone()));
+                        }
+                    }
+                    WizardStep::BaseUrl => {
+                        if let Some(a) = alias {
+                            fields.push(("Alias", a.clone()));
+                        }
+                        if let Some(m) = model_id {
+                            fields.push(("Model ID", m.clone()));
+                        }
+                        if api_key.is_some() {
+                            fields.push(("API key", "(set)".into()));
+                        }
+                    }
+                }
+                fields
+            }
+            InputMode::ModelUpdateWizard {
+                provider,
+                step,
+                api_key,
+            } => {
+                let mut fields = Vec::new();
+                fields.push(("Provider", provider.clone()));
+                match step {
+                    UpdateStep::ApiKey => {}
+                    UpdateStep::BaseUrl => {
+                        if api_key.is_some() {
+                            fields.push(("API key", "(set)".into()));
+                        } else {
+                            fields.push(("API key", "(unchanged)".into()));
+                        }
+                    }
+                }
+                fields
+            }
+            InputMode::Normal => Vec::new(),
+        }
+    }
+
+    /// Whether the wizard is active.
+    pub fn in_wizard(&self) -> bool {
+        !matches!(self.input_mode, InputMode::Normal)
+    }
+
+    /// Number of completed wizard fields (for dynamic input height).
+    pub fn wizard_field_count(&self) -> u16 {
+        self.wizard_completed_fields().len() as u16
     }
 }
 
@@ -1241,5 +1439,76 @@ mod tests {
         );
 
         assert!(app.yaml_status.is_none());
+    }
+
+    // ── Conversation sync tests ──
+
+    #[test]
+    fn conversation_sync_populates_thread_conversations() {
+        use crate::pipeline::events::ConversationEntry;
+        let mut app = TuiApp::new();
+        let entries = vec![
+            ConversationEntry {
+                role: "user".into(),
+                summary: "Read the file".into(),
+                is_tool_use: false,
+                tool_name: None,
+                is_error: false,
+            },
+            ConversationEntry {
+                role: "assistant".into(),
+                summary: "Here's the content.".into(),
+                is_tool_use: false,
+                tool_name: None,
+                is_error: false,
+            },
+        ];
+        app.update(TuiMessage::Pipeline(PipelineEvent::ConversationSync {
+            thread_id: "thread-1".into(),
+            entries,
+        }));
+        assert!(app.thread_conversations.contains_key("thread-1"));
+        assert_eq!(app.thread_conversations["thread-1"].len(), 2);
+        assert!(app.conversation_auto_scroll);
+    }
+
+    #[test]
+    fn empty_thread_has_no_conversation() {
+        let app = TuiApp::new();
+        assert!(app.thread_conversations.is_empty());
+    }
+
+    #[test]
+    fn conversation_scroll_helpers() {
+        let mut app = TuiApp::new();
+        app.conversation_scroll = 5;
+        app.scroll_conversation_up();
+        assert_eq!(app.conversation_scroll, 4);
+        assert!(!app.conversation_auto_scroll);
+
+        app.scroll_conversation_down();
+        assert_eq!(app.conversation_scroll, 5);
+    }
+
+    #[test]
+    fn conversation_scroll_clamps_at_zero() {
+        let mut app = TuiApp::new();
+        app.conversation_scroll = 0;
+        app.scroll_conversation_up();
+        assert_eq!(app.conversation_scroll, 0);
+    }
+
+    #[test]
+    fn threads_focus_cycles_through_conversation() {
+        let mut app = TuiApp::new();
+        app.active_tab = ActiveTab::Threads;
+        assert_eq!(app.threads_focus, ThreadsFocus::ThreadList);
+
+        // Simulate Tab presses
+        app.threads_focus = ThreadsFocus::Conversation;
+        assert_eq!(app.threads_focus, ThreadsFocus::Conversation);
+
+        app.threads_focus = ThreadsFocus::ContextTree;
+        assert_eq!(app.threads_focus, ThreadsFocus::ContextTree);
     }
 }

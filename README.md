@@ -2,7 +2,7 @@
 
 An operating system for AI coding agents — not a framework, not a library, not a tool.
 
-BestCode is the runtime kernel of [AgentOS](https://github.com/dullfig): a complete,
+BestCode is the runtime kernel of [AgentOS](https://github.com/dullfig): complete,
 secure, validated infrastructure where AI agents read, write, search, and execute
 with the same guarantees an OS provides to processes. Every message is untrusted.
 Every capability is structural. Every state change is durable.
@@ -11,12 +11,14 @@ Built on [rust-pipeline](https://github.com/dullfig/rust-pipeline), a zero-trust
 async message pipeline where handler responses re-enter as untrusted bytes —
 because the most dangerous input is the output you just produced.
 
+**691 tests. ~27,000 lines of Rust. Zero unsafe blocks. No compaction, ever.**
+
 ## Architecture
 
 ```
                     ┌─────────────────────────────────┐
                     │         Control Room (TUI)       │
-                    │   ratatui · TEA · XML renderers  │
+                    │  Messages │ Threads │ YAML │ Debug│
                     └────────────────┬────────────────┘
                                      │ event bus
     ┌────────────────────────────────┼────────────────────────────────┐
@@ -42,16 +44,77 @@ because the most dangerous input is the output you just produced.
                     └─────────────────────────────────┘
 ```
 
+**One thinker (Opus), everything else executes.** Tools don't think. The agent calls tools through the pipeline, tools reply with results, the pipeline routes everything under zero-trust security.
+
 Three pieces of nuclear-proof state compose the kernel:
 
-- **Thread Table** — the call stack. Threads can recurse arbitrarily (`root.a.b.c.c.c...`), making the pipeline Turing-complete.
-- **Context Store** — virtual memory for attention. Three-tier hierarchy: expanded (active working set), folded (compressed summaries), evicted (on disk). The librarian is kswapd, not the OOM killer.
-- **Message Journal** — audit trail and tape. Configurable retention: `retain_forever` for coding agents, `prune_on_delivery` for stateless services, `retain_days` for compliance.
+- **Thread Table** — the call stack. Threads recurse arbitrarily (`root.a.b.c.c.c...`), making the pipeline Turing-complete.
+- **Context Store** — virtual memory for attention. Three tiers: expanded (active), folded (summarized), evicted (on disk). The librarian is kswapd, not the OOM killer.
+- **Message Journal** — audit trail and tape. Configurable retention: `retain_forever` (coding), `prune_on_delivery` (stateless), `retain_days` (compliance).
+
+## Quick Start
+
+```bash
+# Build
+cargo build --release
+
+# Run with API key in environment
+export ANTHROPIC_API_KEY=sk-ant-...
+cargo run
+
+# Or start without a key — configure interactively via TUI
+cargo run
+# Then: /models add anthropic → wizard prompts for alias, model ID, API key
+```
+
+### CLI
+
+```
+bestcode [OPTIONS]
+
+  -d, --dir <DIR>            Working directory (default: current)
+  -m, --model <MODEL>        Model alias (default: sonnet)
+  -o, --organism <ORGANISM>  Path to organism.yaml (default: embedded)
+      --data <DATA>          Kernel data directory (default: .bestcode/)
+      --debug                Enable debug tab (activity trace)
+```
+
+### TUI Commands
+
+| Command | Description |
+|---------|-------------|
+| `/model <alias>` | Switch model (opus, sonnet, sonnet-4.5, haiku) |
+| `/models` | List models available from API |
+| `/models add <provider>` | Interactive wizard to add a provider |
+| `/models update <provider>` | Update API key for a provider |
+| `/models remove <alias>` | Remove a model |
+| `/models default <alias>` | Set the default model |
+| `/clear` | Clear chat |
+| `/help` | Show all commands |
+| `/exit` | Quit |
+
+### Keyboard
+
+| Key | Action |
+|-----|--------|
+| Enter | Submit task to agent |
+| F10 | Toggle menu bar |
+| Ctrl+1-5 | Switch tabs (Messages, Threads, YAML, Debug) |
+| Alt+letter | Menu accelerators |
+| Ctrl+S | Validate YAML (YAML tab) |
+| Ctrl+Space | Trigger completions (YAML editor) |
+| Ctrl+H | Hover info (YAML editor) |
+| Ctrl+C | Quit |
 
 ## Security
 
 Security is structural, not behavioral. You cannot prompt-inject your way past
-a dispatch table that simply does not contain the route you are trying to reach.
+a dispatch table that does not contain the route you are trying to reach.
+
+Three concentric walls:
+1. **Dispatch table** — missing route = structural impossibility
+2. **Linux user isolation** — each organism runs as its own user
+3. **Kernel process isolation** — one WAL, one process, atomic operations
 
 ```yaml
 # organism.yaml — security profiles
@@ -62,31 +125,40 @@ profiles:
     listeners: [file-read, glob, grep]
 ```
 
-Three concentric walls:
-1. **Dispatch table** — missing route = structural impossibility
-2. **Linux user isolation** — each organism runs as its own user
-3. **Kernel process isolation** — one WAL, one process, atomic operations
-
 The command-exec tool enforces an allowlist at the token level — the first word
-of every command is checked before execution. No shell injection, no escape.
+of every command is checked before execution. WASM user tools run in
+capability-based sandboxes — they can only access what their WIT interface declares.
 
 ## The Coding Agent
 
-A stateful agentic loop built on Anthropic's tool-use protocol. One thinker
-(Opus), everything else executes. Tools don't think.
+A stateful agentic loop on Anthropic's tool-use protocol. The agent maintains
+per-thread state machines: task arrives, model reasons, tool calls dispatch
+through the pipeline as first-class messages, results return as untrusted bytes,
+model continues. The full OODA loop with structural security at every transition.
 
-The agent maintains per-thread state machines: task arrives, model reasons,
-tool calls dispatch through the pipeline as first-class messages, results
-return as untrusted bytes, model continues. The full OODA loop with structural
-security at every transition.
+Agent identity is data, not code. Prompts, model selection, token limits, and
+iteration caps are all declared in the organism YAML. New agent types require
+a YAML block and a prompt file — zero Rust.
+
+```yaml
+prompts:
+  coding_base: |
+    You are a coding agent running inside AgentOS...
+    {tool_definitions}
+  no_paperclipper: |
+    You are bounded. You do not pursue goals beyond your task.
+
+listeners:
+  - name: coding-agent
+    handler: agent.handle
+    agent:
+      prompt: "no_paperclipper & coding_base"  # composition with &
+      max_tokens: 4096
+```
 
 **Semantic routing** discovers tools by embedding similarity — the agent
-describes what it needs, the router finds the capability. No hardcoded
-dispatch tables for user-defined tools.
-
-**WASM sandboxing** lets users bring their own tools as WebAssembly components.
-Full capability-based security: a WASM tool can only access what its WIT
-interface declares.
+describes what it needs, the router finds the capability. No hardcoded dispatch
+for user-defined tools.
 
 ## The Librarian
 
@@ -98,52 +170,84 @@ full 113K history.
 
 The architecture mirrors Conway's
 [Self-Memory System](https://www.sciencedirect.com/science/article/pii/S0749596X05000987)
-(2005) — convergent design from first principles. The context store is the
-autobiographical knowledge base; the librarian is the conceptual self;
-fold summaries are constructed memories, not retrieved ones. Scratch contexts
-are working memory — you remember the answer, not the carry digits.
+(2005). The context store is the autobiographical knowledge base; the librarian
+is the conceptual self; fold summaries are constructed memories, not retrieved ones.
+Scratch contexts are working memory — you remember the answer, not the carry digits.
 
 Forgetting is the primary feature of functional memory.
+
+## Model Management
+
+Multi-provider support (Anthropic, OpenAI, Ollama) with persistent config:
+
+```yaml
+# ~/.bestcode/models.yaml
+providers:
+  anthropic:
+    api_key: sk-ant-...
+    models:
+      opus: claude-opus-4-6
+      sonnet: claude-sonnet-4-6
+      haiku: claude-haiku-4-5-20251001
+default: sonnet
+```
+
+`/models` queries the API to show which models your key supports. `/models add`
+walks through an interactive wizard. `/model <alias>` hot-swaps the active model
+and rebuilds the HTTP client if the provider changes (e.g., switching from
+Anthropic to OpenAI).
+
+Starts without an API key — configure via the TUI, no restart needed.
+
+## The Control Room
+
+A ratatui terminal UI following TEA (The Elm Architecture):
+
+- **Messages tab** — conversation with the agent, markdown rendering, D2 diagram art
+- **Threads tab** — three-pane split: thread list, conversation timeline, context tree
+- **YAML tab** — tree-sitter syntax-highlighted editor for the organism config, with diagnostics, completions, and hover from an in-process language service
+- **Debug tab** — live activity trace with timestamps (enabled with `--debug`)
+
+The YAML editor provides the same intelligence as a real LSP — schema-aware
+completions, cross-reference validation, hover documentation — but runs as
+pure functions on the editor buffer. No JSON-RPC, no server process.
+
+Command palette (type `/`) shows filtered commands with ghost-text autocomplete.
+Menu bar (F10) with dropdown navigation and Alt+letter accelerators.
 
 ## Modules
 
 | Module | Purpose |
 |--------|---------|
-| `kernel` | WAL, thread table, context store, message journal |
-| `agent` | Coding agent handler, tool-use state machine, JSON/XML translation |
-| `librarian` | Haiku-powered context curation, tree-sitter symbol extraction |
-| `llm` | Anthropic API client, connection pooling, message types |
-| `tools` | Six native tool peers: read, write, edit, glob, grep, exec |
-| `wasm` | WASM+WIT component runtime, capability-based sandboxing |
-| `routing` | Semantic router, TF-IDF embeddings, form filler |
-| `embedding` | Embedding provider trait, TF-IDF implementation |
-| `organism` | YAML-driven organism configuration, security profiles |
-| `pipeline` | Builder pattern, event bus, pipeline integration |
-| `tui` | ratatui Control Room: dashboard, context tree, XML renderers |
-| `ports` | Port manager, firewall |
-| `security` | Security profile enforcement |
-
-## Numbers
-
-- **~19,000** lines of Rust
-- **461** tests (unit + integration)
-- **6** native tool peers
-- **13** modules
-- **0** unsafe blocks
+| `kernel/` | WAL, thread table, context store, message journal — durable state |
+| `agent/` | Coding agent: agentic loop, tool-use state machine, JSON/XML translation, prompts |
+| `pipeline/` | Builder pattern, event bus, organism-to-pipeline wiring |
+| `organism/` | YAML config: listeners, profiles, prompts, agent config, WASM config |
+| `security/` | Dispatch table enforcement, profile resolution |
+| `llm/` | Anthropic API client, LlmPool, model aliasing, list models API |
+| `config/` | Multi-provider model config (`~/.bestcode/models.yaml`) |
+| `tools/` | Six native tool peers: file-read, file-write, file-edit, glob, grep, command-exec |
+| `wasm/` | WASM+WIT component runtime, capability-based sandboxing |
+| `librarian/` | Haiku-powered context curation, relevance-based paging |
+| `routing/` | Semantic router: TF-IDF embeddings, form filler, invisible dispatch |
+| `embedding/` | EmbeddingProvider trait, TF-IDF implementation |
+| `treesitter/` | Code indexing, symbol extraction via tree-sitter |
+| `lsp/` | In-process language intelligence for YAML editor and command line |
+| `tui/` | ratatui Control Room: TEA model, multi-tab dashboard, D2 diagrams |
+| `ports/` | Port manager, firewall, network protocol validation |
 
 ## Building
 
 ```bash
-# Prerequisites: Rust toolchain, Anthropic API key for live tests
-cargo build
-cargo test --lib          # 461 tests, no API key needed
-cargo test                # includes live integration tests (needs ANTHROPIC_API_KEY)
-cargo clippy              # clean
+cargo build                # debug build
+cargo test --lib           # 691 tests, no API key needed, ~7s
+cargo test                 # full suite including live API integration tests
+cargo clippy               # zero warnings from project code
 ```
 
 ## Target Hardware
 
-A Raspberry Pi 5 running the kernel locally, with cloud LLM inference.
+Raspberry Pi 5 running the kernel locally, with cloud LLM inference.
 The expensive part is the thinking, not the infrastructure.
 
 ## License

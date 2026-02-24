@@ -4,7 +4,29 @@
 
 use reqwest::Client;
 
+use serde::Deserialize;
+
 use super::types::{MessagesRequest, MessagesResponse};
+
+/// A model returned by the List Models API.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelInfo {
+    /// Model ID (e.g. "claude-sonnet-4-6").
+    pub id: String,
+    /// Human-readable name (e.g. "Claude Sonnet 4.6").
+    pub display_name: String,
+    /// ISO 8601 creation/release date.
+    pub created_at: String,
+}
+
+/// Response from GET /v1/models.
+#[derive(Debug, Deserialize)]
+struct ModelsListResponse {
+    data: Vec<ModelInfo>,
+    has_more: bool,
+    #[allow(dead_code)]
+    last_id: Option<String>,
+}
 
 /// Errors from LLM operations.
 #[derive(Debug, thiserror::Error)]
@@ -89,6 +111,54 @@ impl AnthropicClient {
             .map_err(|e| LlmError::InvalidResponse(format!("failed to parse response: {e}")))?;
 
         Ok(resp)
+    }
+
+    /// List available models from the API.
+    /// Paginates automatically to fetch all models.
+    pub async fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError> {
+        let mut all_models = Vec::new();
+        let mut after_id: Option<String> = None;
+
+        loop {
+            let mut url = format!("{}/v1/models?limit=100", self.base_url);
+            if let Some(ref cursor) = after_id {
+                url.push_str(&format!("&after_id={cursor}"));
+            }
+
+            let response = self
+                .http
+                .get(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", &self.api_version)
+                .send()
+                .await?;
+
+            let status = response.status().as_u16();
+            if status >= 400 {
+                let body = response.text().await.unwrap_or_else(|_| "(no body)".into());
+                return Err(LlmError::ApiError {
+                    status,
+                    message: body,
+                });
+            }
+
+            let page: ModelsListResponse = response
+                .json()
+                .await
+                .map_err(|e| LlmError::InvalidResponse(format!("failed to parse models list: {e}")))?;
+
+            let has_more = page.has_more;
+            let last = page.data.last().map(|m| m.id.clone());
+            all_models.extend(page.data);
+
+            if has_more {
+                after_id = last;
+            } else {
+                break;
+            }
+        }
+
+        Ok(all_models)
     }
 }
 

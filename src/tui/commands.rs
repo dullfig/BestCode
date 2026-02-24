@@ -7,16 +7,42 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::llm::LlmPool;
-use crate::llm::types::resolve_model;
 
-use super::app::{ChatEntry, TuiApp};
+use super::app::{ChatEntry, InputMode, TuiApp, UpdateStep, WizardStep};
+
+/// What kind of values an argument accepts.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArgKind {
+    /// Fixed set of known values (e.g., opus/sonnet/haiku).
+    Enum(&'static [&'static str]),
+    /// Free-form text — no completions but shows hint.
+    Free(&'static str),
+}
+
+/// A positional argument in a command.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArgSpec {
+    pub name: &'static str,
+    pub kind: ArgKind,
+}
+
+/// A subcommand (e.g., "install" under "/plugins").
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubcommandSpec {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub args: &'static [ArgSpec],
+}
 
 /// A slash command definition.
+#[derive(Debug, PartialEq)]
 pub struct SlashCommand {
     pub name: &'static str,
     pub aliases: &'static [&'static str],
     pub description: &'static str,
     pub has_arg: bool,
+    pub args: &'static [ArgSpec],
+    pub subcommands: &'static [SubcommandSpec],
 }
 
 /// All known commands.
@@ -26,24 +52,76 @@ pub static COMMANDS: &[SlashCommand] = &[
         aliases: &["/quit"],
         description: "Quit BestCode",
         has_arg: false,
+        args: &[],
+        subcommands: &[],
     },
     SlashCommand {
         name: "/clear",
         aliases: &[],
         description: "Clear chat log",
         has_arg: false,
+        args: &[],
+        subcommands: &[],
     },
     SlashCommand {
         name: "/model",
         aliases: &[],
-        description: "Switch default model (opus/sonnet/haiku or full ID)",
+        description: "Switch default model (opus/sonnet/sonnet-4.5/haiku or full ID)",
         has_arg: true,
+        args: &[ArgSpec {
+            name: "model_id",
+            kind: ArgKind::Enum(&["opus", "sonnet", "sonnet-4.5", "haiku"]),
+        }],
+        subcommands: &[],
     },
     SlashCommand {
         name: "/help",
         aliases: &[],
         description: "List available commands",
         has_arg: false,
+        args: &[],
+        subcommands: &[],
+    },
+    SlashCommand {
+        name: "/models",
+        aliases: &[],
+        description: "Manage configured models",
+        has_arg: true,
+        args: &[],
+        subcommands: &[
+            SubcommandSpec {
+                name: "add",
+                description: "Add a new model",
+                args: &[ArgSpec {
+                    name: "provider",
+                    kind: ArgKind::Free("anthropic|openai|ollama"),
+                }],
+            },
+            SubcommandSpec {
+                name: "remove",
+                description: "Remove a model",
+                args: &[ArgSpec {
+                    name: "alias",
+                    kind: ArgKind::Free("model alias"),
+                }],
+            },
+            SubcommandSpec {
+                name: "default",
+                description: "Set default model",
+                args: &[ArgSpec {
+                    name: "alias",
+                    kind: ArgKind::Free("model alias"),
+                }],
+            },
+            SubcommandSpec {
+                name: "update",
+                description: "Update provider API key or base URL",
+                args: &[ArgSpec {
+                    name: "provider",
+                    kind: ArgKind::Free("anthropic|openai|ollama"),
+                }],
+            },
+        ],
     },
 ];
 
@@ -151,9 +229,10 @@ pub async fn execute(
     input: &str,
     pool: Option<&Arc<Mutex<LlmPool>>>,
 ) -> CommandResult {
-    let parts: Vec<&str> = input.splitn(2, ' ').collect();
+    let parts: Vec<&str> = input.splitn(3, ' ').collect();
     let cmd_str = parts[0];
     let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+    let arg2 = parts.get(2).map(|s| s.trim()).unwrap_or("");
 
     match cmd_str {
         "/exit" | "/quit" => {
@@ -179,26 +258,56 @@ pub async fn execute(
                     let p = p.lock().await;
                     p.default_model().to_string()
                 } else {
-                    "unknown (no pool)".into()
+                    "No LLM pool — use /models add to configure".into()
                 };
                 CommandResult {
                     feedback: Some(format!("Current model: {current}")),
                     handled: true,
                 }
             } else if let Some(p) = pool {
-                let resolved = resolve_model(arg);
+                // Rebuild pool for the target alias (handles cross-provider switches)
+                let config = app.models_config.lock().await;
                 let mut p = p.lock().await;
-                p.set_default_model(arg);
-                CommandResult {
-                    feedback: Some(format!("Model set to: {resolved}")),
-                    handled: true,
+                match p.rebuild_for_alias(&config, arg) {
+                    Ok(()) => CommandResult {
+                        feedback: Some(format!("Model set to: {}", p.default_model())),
+                        handled: true,
+                    },
+                    Err(e) => CommandResult {
+                        feedback: Some(format!("Failed to switch model: {e}")),
+                        handled: true,
+                    },
                 }
             } else {
-                CommandResult {
-                    feedback: Some("No LLM pool available".into()),
-                    handled: true,
+                // No pool — try to create one from config
+                let config = app.models_config.lock().await;
+                match crate::llm::LlmPool::from_config(&config) {
+                    Ok(mut new_pool) => {
+                        match new_pool.rebuild_for_alias(&config, arg) {
+                            Ok(()) => {
+                                let model = new_pool.default_model().to_string();
+                                drop(config);
+                                app.llm_pool = Some(Arc::new(Mutex::new(new_pool)));
+                                CommandResult {
+                                    feedback: Some(format!("Pool connected. Model set to: {model}")),
+                                    handled: true,
+                                }
+                            }
+                            Err(e) => CommandResult {
+                                feedback: Some(format!("Failed to switch model: {e}")),
+                                handled: true,
+                            },
+                        }
+                    }
+                    Err(e) => CommandResult {
+                        feedback: Some(format!("No LLM pool and can't create one: {e}. Use /models add first.")),
+                        handled: true,
+                    },
                 }
             }
+        }
+        "/models" => {
+            execute_models(app, arg, arg2, pool).await
         }
         "/help" => {
             let mut lines = Vec::new();
@@ -208,7 +317,13 @@ pub async fn execute(
                 } else {
                     format!(" ({})", cmd.aliases.join(", "))
                 };
-                let arg_hint = if cmd.has_arg { " <arg>" } else { "" };
+                let arg_hint = if !cmd.args.is_empty() {
+                    format!(" {}", cmd.args.iter().map(|a| format!("<{}>", a.name)).collect::<Vec<_>>().join(" "))
+                } else if cmd.has_arg {
+                    " <arg>".to_string()
+                } else {
+                    String::new()
+                };
                 lines.push(format!(
                     "  {}{}{} — {}",
                     cmd.name, arg_hint, aliases, cmd.description
@@ -233,6 +348,144 @@ pub fn push_feedback(app: &mut TuiApp, text: &str) {
         text: text.into(),
     });
     app.message_auto_scroll = true;
+}
+
+/// Handle `/models` subcommands.
+async fn execute_models(
+    app: &mut TuiApp,
+    subcommand: &str,
+    arg: &str,
+    pool: Option<&Arc<Mutex<LlmPool>>>,
+) -> CommandResult {
+    match subcommand {
+        "" => {
+            // /models — list available models from API, fall back to config
+            let mut output = String::new();
+
+            if let Some(p) = pool {
+                let p = p.lock().await;
+                match p.list_models().await {
+                    Ok(models) => {
+                        let current = p.default_model().to_string();
+                        output.push_str("Available models (from API):\n");
+                        for m in &models {
+                            let marker = if m.id == current { " *" } else { "  " };
+                            output.push_str(&format!("{marker} {:<40} {}\n", m.id, m.display_name));
+                        }
+                        if models.is_empty() {
+                            output.push_str("  (none returned)\n");
+                        }
+                        output.push_str(&format!("\nActive: {current}"));
+                    }
+                    Err(e) => {
+                        // API query failed — fall back to config list
+                        output.push_str(&format!("API query failed: {e}\n\n"));
+                        let config = app.models_config.lock().await;
+                        output.push_str(&crate::config::format_model_list(&config));
+                    }
+                }
+            } else {
+                // No pool — show config only
+                let config = app.models_config.lock().await;
+                output.push_str(&crate::config::format_model_list(&config));
+            }
+
+            CommandResult {
+                feedback: Some(output),
+                handled: true,
+            }
+        }
+        "add" => {
+            let provider = if arg.is_empty() { "anthropic" } else { arg };
+            app.input_mode = InputMode::ModelAddWizard {
+                provider: provider.to_string(),
+                step: WizardStep::Alias,
+                alias: None,
+                model_id: None,
+                api_key: None,
+            };
+            app.clear_input();
+            CommandResult {
+                feedback: None,
+                handled: true,
+            }
+        }
+        "remove" => {
+            if arg.is_empty() {
+                return CommandResult {
+                    feedback: Some("Usage: /models remove <alias>".into()),
+                    handled: true,
+                };
+            }
+            let mut config = app.models_config.lock().await;
+            if config.remove_model(arg) {
+                let _ = config.save();
+                drop(config);
+                CommandResult {
+                    feedback: Some(format!("Removed model: {arg}")),
+                    handled: true,
+                }
+            } else {
+                CommandResult {
+                    feedback: Some(format!("Unknown model alias: {arg}")),
+                    handled: true,
+                }
+            }
+        }
+        "default" => {
+            if arg.is_empty() {
+                return CommandResult {
+                    feedback: Some("Usage: /models default <alias>".into()),
+                    handled: true,
+                };
+            }
+            let mut config = app.models_config.lock().await;
+            if config.set_default(arg) {
+                let _ = config.save();
+                // Also switch the active pool model
+                if let Some(p) = pool {
+                    let mut p = p.lock().await;
+                    p.set_default_model_from_config(&config, arg);
+                }
+                drop(config);
+                CommandResult {
+                    feedback: Some(format!("Default model set to: {arg}")),
+                    handled: true,
+                }
+            } else {
+                CommandResult {
+                    feedback: Some(format!("Unknown model alias: {arg}")),
+                    handled: true,
+                }
+            }
+        }
+        "update" => {
+            let provider = if arg.is_empty() { "anthropic" } else { arg };
+            // Verify provider exists
+            let config = app.models_config.lock().await;
+            if !config.providers.contains_key(provider) {
+                return CommandResult {
+                    feedback: Some(format!("Unknown provider: {provider}. Add a model first with /models add {provider}.")),
+                    handled: true,
+                };
+            }
+            drop(config);
+            app.input_mode = InputMode::ModelUpdateWizard {
+                provider: provider.to_string(),
+                step: UpdateStep::ApiKey,
+                api_key: None,
+            };
+            app.clear_input();
+            CommandResult {
+                feedback: None,
+                handled: true,
+            }
+        }
+        _ => CommandResult {
+            feedback: Some(format!("Unknown /models subcommand: {subcommand}. Use add, remove, default, or update.")),
+            handled: true,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -358,6 +611,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_model_no_pool_shows_hint() {
+        let mut app = TuiApp::new();
+        let result = execute(&mut app, "/model", None).await;
+        assert!(result.handled);
+        assert!(result.feedback.unwrap().contains("/models add"));
+    }
+
+    #[tokio::test]
+    async fn execute_model_no_pool_creates_from_config() {
+        let mut app = TuiApp::new();
+        // Set up config with a key
+        {
+            let mut config = app.models_config.lock().await;
+            config.add_model("anthropic", "haiku", "claude-haiku-4-5-20251001", Some("sk-test".into()), None);
+        }
+        assert!(app.llm_pool.is_none());
+
+        let result = execute(&mut app, "/model haiku", None).await;
+        assert!(result.handled);
+        assert!(result.feedback.unwrap().contains("Pool connected"));
+        // Pool should now exist
+        let pool_arc = app.llm_pool.unwrap();
+        let p = pool_arc.lock().await;
+        assert_eq!(p.default_model(), "claude-haiku-4-5-20251001");
+    }
+
+    #[tokio::test]
     async fn execute_help() {
         let mut app = TuiApp::new();
         let result = execute(&mut app, "/help", None).await;
@@ -375,5 +655,104 @@ mod tests {
         let result = execute(&mut app, "/foobar", None).await;
         assert!(result.handled);
         assert!(result.feedback.unwrap().contains("Unknown command"));
+    }
+
+    // ── /models tests ──
+
+    #[tokio::test]
+    async fn execute_models_list() {
+        let mut app = TuiApp::new();
+        // Add a model to config
+        {
+            let mut config = app.models_config.lock().await;
+            config.add_model("anthropic", "opus", "claude-opus-4-6", Some("key".into()), None);
+            config.set_default("opus");
+        }
+        let result = execute(&mut app, "/models", None).await;
+        assert!(result.handled);
+        let text = result.feedback.unwrap();
+        assert!(text.contains("opus"));
+        assert!(text.contains("anthropic"));
+        assert!(text.contains("(default)"));
+    }
+
+    #[tokio::test]
+    async fn execute_models_add_enters_wizard() {
+        let mut app = TuiApp::new();
+        let result = execute(&mut app, "/models add anthropic", None).await;
+        assert!(result.handled);
+        assert!(result.feedback.is_none()); // wizard mode, no immediate feedback
+        match &app.input_mode {
+            InputMode::ModelAddWizard { provider, step, .. } => {
+                assert_eq!(provider, "anthropic");
+                assert_eq!(*step, WizardStep::Alias);
+            }
+            _ => panic!("expected ModelAddWizard"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_models_remove() {
+        let mut app = TuiApp::new();
+        {
+            let mut config = app.models_config.lock().await;
+            config.add_model("anthropic", "opus", "claude-opus-4-6", Some("key".into()), None);
+        }
+        let result = execute(&mut app, "/models remove opus", None).await;
+        assert!(result.handled);
+        assert!(result.feedback.unwrap().contains("Removed"));
+        // Verify it's gone
+        let config = app.models_config.lock().await;
+        assert!(config.resolve("opus").is_none());
+    }
+
+    #[tokio::test]
+    async fn execute_models_default() {
+        let mut app = TuiApp::new();
+        {
+            let mut config = app.models_config.lock().await;
+            config.add_model("anthropic", "opus", "claude-opus-4-6", Some("key".into()), None);
+            config.add_model("anthropic", "sonnet", "claude-sonnet-4-6", None, None);
+        }
+        let result = execute(&mut app, "/models default opus", None).await;
+        assert!(result.handled);
+        assert!(result.feedback.unwrap().contains("Default model set to: opus"));
+        let config = app.models_config.lock().await;
+        assert_eq!(config.default, Some("opus".into()));
+    }
+
+    #[tokio::test]
+    async fn execute_models_default_unknown() {
+        let mut app = TuiApp::new();
+        let result = execute(&mut app, "/models default nonexistent", None).await;
+        assert!(result.handled);
+        assert!(result.feedback.unwrap().contains("Unknown model alias"));
+    }
+
+    #[tokio::test]
+    async fn execute_models_update_enters_wizard() {
+        let mut app = TuiApp::new();
+        {
+            let mut config = app.models_config.lock().await;
+            config.add_model("anthropic", "opus", "claude-opus-4-6", Some("old-key".into()), None);
+        }
+        let result = execute(&mut app, "/models update anthropic", None).await;
+        assert!(result.handled);
+        assert!(result.feedback.is_none()); // wizard mode
+        match &app.input_mode {
+            InputMode::ModelUpdateWizard { provider, step, .. } => {
+                assert_eq!(provider, "anthropic");
+                assert_eq!(*step, UpdateStep::ApiKey);
+            }
+            _ => panic!("expected ModelUpdateWizard"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_models_update_unknown_provider() {
+        let mut app = TuiApp::new();
+        let result = execute(&mut app, "/models update nonexistent", None).await;
+        assert!(result.handled);
+        assert!(result.feedback.unwrap().contains("Unknown provider"));
     }
 }

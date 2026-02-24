@@ -7,12 +7,24 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Resolve model aliases to full Anthropic model IDs.
+/// This is the hardcoded fallback — prefer `resolve_model_from_config` when config is available.
 pub fn resolve_model(alias: &str) -> &str {
     match alias {
-        "opus" => "claude-opus-4-20250514",
-        "sonnet" => "claude-sonnet-4-5-20250514",
+        "opus" => "claude-opus-4-6",
+        "sonnet" => "claude-sonnet-4-6",
+        "sonnet-4.5" => "claude-sonnet-4-5-20250929",
         "haiku" => "claude-haiku-4-5-20251001",
         _ => alias, // pass through full model IDs
+    }
+}
+
+/// Resolve a model alias using the config first, falling back to hardcoded aliases.
+/// Returns the full model ID string.
+pub fn resolve_model_from_config(config: &crate::config::ModelsConfig, alias: &str) -> String {
+    if let Some(resolved) = config.resolve(alias) {
+        resolved.model_id
+    } else {
+        resolve_model(alias).to_string()
     }
 }
 
@@ -271,8 +283,9 @@ mod tests {
 
     #[test]
     fn resolve_model_aliases() {
-        assert_eq!(resolve_model("opus"), "claude-opus-4-20250514");
-        assert_eq!(resolve_model("sonnet"), "claude-sonnet-4-5-20250514");
+        assert_eq!(resolve_model("opus"), "claude-opus-4-6");
+        assert_eq!(resolve_model("sonnet"), "claude-sonnet-4-6");
+        assert_eq!(resolve_model("sonnet-4.5"), "claude-sonnet-4-5-20250929");
         assert_eq!(resolve_model("haiku"), "claude-haiku-4-5-20251001");
     }
 

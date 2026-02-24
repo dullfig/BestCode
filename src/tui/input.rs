@@ -8,8 +8,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui_menu::MenuEvent;
 
-use super::app::{ActiveTab, AgentStatus, ChatEntry, MenuAction, ThreadsFocus, TuiApp};
-use super::commands;
+use crate::lsp::LanguageService;
+
+use super::app::{ActiveTab, AgentStatus, ChatEntry, InputMode, MenuAction, ThreadsFocus, TuiApp, UpdateCompletion, UpdateStep, WizardCompletion, WizardStep};
 
 /// Dispatch a selected menu action.
 fn dispatch_menu_action(app: &mut TuiApp, action: MenuAction) {
@@ -66,6 +67,28 @@ fn dispatch_menu_action(app: &mut TuiApp, action: MenuAction) {
 /// Get the current input text (first line).
 fn current_input(app: &TuiApp) -> String {
     app.input_text()
+}
+
+/// Replace the last (possibly partial) token with the completion text.
+/// If the completion starts with `/`, it replaces the whole input (command name).
+/// Otherwise it replaces the last whitespace-delimited token.
+fn complete_token(input: &str, completion: &str) -> String {
+    if completion.starts_with('/') {
+        // Command name completion — replaces entire input
+        completion.to_string()
+    } else {
+        // Argument completion — keep prefix up to last token boundary
+        let prefix = if input.ends_with(' ') {
+            input
+        } else {
+            input.rsplit_once(' ').map(|(p, _)| p).unwrap_or(input)
+        };
+        if prefix.ends_with(' ') {
+            format!("{prefix}{completion}")
+        } else {
+            format!("{prefix} {completion}")
+        }
+    }
 }
 
 /// Replace the input editor content with new text and move cursor to end.
@@ -135,6 +158,141 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) {
             dispatch_menu_action(app, action);
         }
         return;
+    }
+
+    // Wizard mode: intercept Enter/Esc, forward everything else to input editor
+    if let InputMode::ModelAddWizard {
+        ref provider,
+        ref step,
+        ref alias,
+        ref model_id,
+        ref api_key,
+    } = app.input_mode.clone()
+    {
+        match key.code {
+            KeyCode::Esc => {
+                app.input_mode = InputMode::Normal;
+                app.clear_input();
+                app.chat_log.push(ChatEntry {
+                    role: "system".into(),
+                    text: "Model wizard cancelled.".into(),
+                });
+                app.message_auto_scroll = true;
+                return;
+            }
+            KeyCode::Enter => {
+                let value = app.take_input().unwrap_or_default();
+                match step {
+                    WizardStep::Alias => {
+                        if value.is_empty() {
+                            return; // require non-empty alias
+                        }
+                        app.input_mode = InputMode::ModelAddWizard {
+                            provider: provider.clone(),
+                            step: WizardStep::ModelId,
+                            alias: Some(value),
+                            model_id: None,
+                            api_key: None,
+                        };
+                    }
+                    WizardStep::ModelId => {
+                        if value.is_empty() {
+                            return; // require non-empty model ID
+                        }
+                        app.input_mode = InputMode::ModelAddWizard {
+                            provider: provider.clone(),
+                            step: WizardStep::ApiKey,
+                            alias: alias.clone(),
+                            model_id: Some(value),
+                            api_key: None,
+                        };
+                    }
+                    WizardStep::ApiKey => {
+                        // API key can be empty (use existing provider key)
+                        let key_val = if value.is_empty() { None } else { Some(value) };
+                        app.input_mode = InputMode::ModelAddWizard {
+                            provider: provider.clone(),
+                            step: WizardStep::BaseUrl,
+                            alias: alias.clone(),
+                            model_id: model_id.clone(),
+                            api_key: key_val,
+                        };
+                    }
+                    WizardStep::BaseUrl => {
+                        // Complete the wizard
+                        let base_url = if value.is_empty() { None } else { Some(value) };
+                        let final_alias = alias.as_deref().unwrap_or("model");
+                        let final_model_id = model_id.as_deref().unwrap_or("unknown");
+
+                        // We can't await here since handle_key is sync. Store pending wizard completion.
+                        app.pending_wizard_completion = Some(WizardCompletion {
+                            provider: provider.clone(),
+                            alias: final_alias.to_string(),
+                            model_id: final_model_id.to_string(),
+                            api_key: api_key.clone(),
+                            base_url,
+                        });
+                        app.input_mode = InputMode::Normal;
+                    }
+                }
+                return;
+            }
+            _ => {
+                // Forward to input editor
+                let area = app.input_area;
+                let _ = app.input_editor.input(key, &area);
+                return;
+            }
+        }
+    }
+
+    // Update wizard mode: intercept Enter/Esc, forward everything else
+    if let InputMode::ModelUpdateWizard {
+        ref provider,
+        ref step,
+        ref api_key,
+    } = app.input_mode.clone()
+    {
+        match key.code {
+            KeyCode::Esc => {
+                app.input_mode = InputMode::Normal;
+                app.clear_input();
+                app.chat_log.push(ChatEntry {
+                    role: "system".into(),
+                    text: "Update wizard cancelled.".into(),
+                });
+                app.message_auto_scroll = true;
+                return;
+            }
+            KeyCode::Enter => {
+                let value = app.take_input().unwrap_or_default();
+                match step {
+                    UpdateStep::ApiKey => {
+                        let key_val = if value.is_empty() { None } else { Some(value) };
+                        app.input_mode = InputMode::ModelUpdateWizard {
+                            provider: provider.clone(),
+                            step: UpdateStep::BaseUrl,
+                            api_key: key_val,
+                        };
+                    }
+                    UpdateStep::BaseUrl => {
+                        let base_url = if value.is_empty() { None } else { Some(value) };
+                        app.pending_update_completion = Some(UpdateCompletion {
+                            provider: provider.clone(),
+                            api_key: api_key.clone(),
+                            base_url,
+                        });
+                        app.input_mode = InputMode::Normal;
+                    }
+                }
+                return;
+            }
+            _ => {
+                let area = app.input_area;
+                let _ = app.input_editor.input(key, &area);
+                return;
+            }
+        }
     }
 
     // Ctrl+1/2/3/4/5 switch tabs
@@ -236,13 +394,14 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) {
         }
     }
 
-    // Command popup: when input starts with `/` (no space), intercept navigation keys
+    // Command popup: when input starts with `/`, use CommandLineService for completions
     {
         let input = current_input(app);
-        let popup_active = input.starts_with('/') && !input.contains(' ');
-        if popup_active {
-            let matches = commands::matching_commands(&input);
-            if !matches.is_empty() {
+        if input.starts_with('/') {
+            let items = app
+                .cmd_service
+                .completions(&input, lsp_types::Position::new(0, input.len() as u32));
+            if !items.is_empty() {
                 match key.code {
                     KeyCode::Up => {
                         if app.command_popup_index > 0 {
@@ -251,34 +410,32 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) {
                         return;
                     }
                     KeyCode::Down => {
-                        if app.command_popup_index + 1 < matches.len() {
+                        if app.command_popup_index + 1 < items.len() {
                             app.command_popup_index += 1;
                         }
                         return;
                     }
                     KeyCode::Tab => {
-                        if let Some(cmd) = matches.get(app.command_popup_index) {
-                            let mut completion = cmd.name.to_string();
-                            if cmd.has_arg {
-                                completion.push(' ');
-                            }
-                            set_input(app, &completion);
+                        if let Some(item) = items.get(app.command_popup_index) {
+                            let text = item.insert_text.as_deref().unwrap_or(&item.label);
+                            let completed = complete_token(&input, text);
+                            set_input(app, &completed);
                             app.command_popup_index = 0;
                         }
                         return;
                     }
                     KeyCode::Enter => {
-                        if let Some(cmd) = matches.get(app.command_popup_index) {
-                            if cmd.has_arg {
-                                // Command needs args — autocomplete with trailing space
-                                let mut completion = cmd.name.to_string();
-                                completion.push(' ');
-                                set_input(app, &completion);
+                        if let Some(item) = items.get(app.command_popup_index) {
+                            let text = item.insert_text.as_deref().unwrap_or(&item.label);
+                            let completed = complete_token(&input, text);
+                            // If completed text ends with space, command needs more input
+                            if completed.ends_with(' ') {
+                                set_input(app, &completed);
                                 app.command_popup_index = 0;
                                 return;
                             }
-                            // No args needed — fill and fall through to submit
-                            set_input(app, cmd.name);
+                            // Complete value — fill and fall through to submit
+                            set_input(app, &completed);
                             app.command_popup_index = 0;
                             // Don't return — let the Enter handler below submit it
                         }
@@ -293,6 +450,8 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) {
                         app.command_popup_index = 0;
                     }
                 }
+            } else {
+                app.command_popup_index = 0;
             }
         } else {
             // No popup — reset index
@@ -329,7 +488,8 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) {
         KeyCode::Tab => {
             if app.active_tab == ActiveTab::Threads {
                 app.threads_focus = match app.threads_focus {
-                    ThreadsFocus::ThreadList => ThreadsFocus::ContextTree,
+                    ThreadsFocus::ThreadList => ThreadsFocus::Conversation,
+                    ThreadsFocus::Conversation => ThreadsFocus::ContextTree,
                     ThreadsFocus::ContextTree => ThreadsFocus::ThreadList,
                 };
             } else {
@@ -357,6 +517,11 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) {
             ThreadsFocus::ThreadList => {
                 app.move_up();
             }
+            ThreadsFocus::Conversation => {
+                for _ in 0..3 {
+                    app.scroll_conversation_up();
+                }
+            }
             ThreadsFocus::ContextTree => {
                 app.context_tree_state.key_up();
             }
@@ -364,6 +529,11 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) {
         KeyCode::Down if app.active_tab == ActiveTab::Threads => match app.threads_focus {
             ThreadsFocus::ThreadList => {
                 app.move_down();
+            }
+            ThreadsFocus::Conversation => {
+                for _ in 0..3 {
+                    app.scroll_conversation_down();
+                }
             }
             ThreadsFocus::ContextTree => {
                 app.context_tree_state.key_down();
@@ -395,6 +565,12 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) {
         }
         // Page scroll — full page minus 2 overlap lines, dispatched to active tab
         KeyCode::PageUp => match app.active_tab {
+            ActiveTab::Threads if app.threads_focus == ThreadsFocus::Conversation => {
+                let page = app.conversation_viewport_height.saturating_sub(2).max(1);
+                for _ in 0..page {
+                    app.scroll_conversation_up();
+                }
+            }
             ActiveTab::Debug => {
                 let page = app.activity_viewport_height.saturating_sub(2).max(1);
                 for _ in 0..page {
@@ -409,6 +585,12 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) {
             }
         },
         KeyCode::PageDown => match app.active_tab {
+            ActiveTab::Threads if app.threads_focus == ThreadsFocus::Conversation => {
+                let page = app.conversation_viewport_height.saturating_sub(2).max(1);
+                for _ in 0..page {
+                    app.scroll_conversation_down();
+                }
+            }
             ActiveTab::Debug => {
                 let page = app.activity_viewport_height.saturating_sub(2).max(1);
                 for _ in 0..page {
@@ -425,11 +607,15 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) {
         // Jump to top/bottom, dispatched to active tab + focus
         KeyCode::Home => match app.active_tab {
             ActiveTab::Threads => match app.threads_focus {
-                ThreadsFocus::ContextTree => {
-                    app.context_tree_state.select_first();
-                }
                 ThreadsFocus::ThreadList => {
                     app.selected_thread = 0;
+                }
+                ThreadsFocus::Conversation => {
+                    app.conversation_scroll = 0;
+                    app.conversation_auto_scroll = false;
+                }
+                ThreadsFocus::ContextTree => {
+                    app.context_tree_state.select_first();
                 }
             },
             ActiveTab::Debug => {
@@ -443,13 +629,16 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) {
         },
         KeyCode::End => match app.active_tab {
             ActiveTab::Threads => match app.threads_focus {
-                ThreadsFocus::ContextTree => {
-                    app.context_tree_state.select_last();
-                }
                 ThreadsFocus::ThreadList => {
                     if !app.threads.is_empty() {
                         app.selected_thread = app.threads.len() - 1;
                     }
+                }
+                ThreadsFocus::Conversation => {
+                    app.conversation_auto_scroll = true;
+                }
+                ThreadsFocus::ContextTree => {
+                    app.context_tree_state.select_last();
                 }
             },
             ActiveTab::Debug => {
@@ -542,6 +731,9 @@ mod tests {
         let mut app = TuiApp::new();
         app.active_tab = ActiveTab::Threads;
         assert_eq!(app.threads_focus, ThreadsFocus::ThreadList);
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.threads_focus, ThreadsFocus::Conversation);
 
         handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.threads_focus, ThreadsFocus::ContextTree);
@@ -730,5 +922,185 @@ mod tests {
         assert!(!app.menu_active);
         // Menu state exists but is not user-activated
         assert_eq!(app.active_tab, ActiveTab::Messages);
+    }
+
+    #[test]
+    fn enter_on_model_arg_submits_full_command() {
+        let mut app = TuiApp::new();
+        // Type "/model " — popup shows opus/sonnet/sonnet-4.5/haiku
+        type_text(&mut app, "/model ");
+        // Cursor down three times to reach "haiku" (index 3)
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.command_popup_index, 3);
+        // Enter should submit "/model haiku" as a command
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.pending_command, Some("/model haiku".into()));
+        assert!(app.pending_task.is_none());
+    }
+
+    #[test]
+    fn tab_on_model_arg_completes_value() {
+        let mut app = TuiApp::new();
+        type_text(&mut app, "/model h");
+        // Tab should complete to "/model haiku"
+        handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.input_text(), "/model haiku");
+    }
+
+    #[test]
+    fn complete_token_preserves_prefix() {
+        assert_eq!(complete_token("/model ", "haiku"), "/model haiku");
+        assert_eq!(complete_token("/model h", "haiku"), "/model haiku");
+        assert_eq!(complete_token("/mo", "/model "), "/model ");
+        assert_eq!(complete_token("/", "/exit"), "/exit");
+    }
+
+    // ── Conversation focus tests ──
+
+    #[test]
+    fn up_down_on_conversation_focus() {
+        let mut app = TuiApp::new();
+        app.active_tab = ActiveTab::Threads;
+        app.threads_focus = ThreadsFocus::Conversation;
+        app.conversation_scroll = 10;
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.conversation_scroll, 7); // 3 lines per step
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.conversation_scroll, 10);
+    }
+
+    #[test]
+    fn home_end_on_conversation_focus() {
+        let mut app = TuiApp::new();
+        app.active_tab = ActiveTab::Threads;
+        app.threads_focus = ThreadsFocus::Conversation;
+        app.conversation_scroll = 50;
+        app.conversation_auto_scroll = true;
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(app.conversation_scroll, 0);
+        assert!(!app.conversation_auto_scroll);
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert!(app.conversation_auto_scroll);
+    }
+
+    // ── Wizard tests ──
+
+    #[test]
+    fn wizard_enter_advances_step() {
+        let mut app = TuiApp::new();
+        app.input_mode = InputMode::ModelAddWizard {
+            provider: "anthropic".into(),
+            step: WizardStep::Alias,
+            alias: None,
+            model_id: None,
+            api_key: None,
+        };
+        type_text(&mut app, "my-opus");
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        match &app.input_mode {
+            InputMode::ModelAddWizard { step, alias, .. } => {
+                assert_eq!(*step, WizardStep::ModelId);
+                assert_eq!(alias.as_deref(), Some("my-opus"));
+            }
+            _ => panic!("expected wizard to advance to ModelId"),
+        }
+    }
+
+    #[test]
+    fn wizard_esc_cancels() {
+        let mut app = TuiApp::new();
+        app.input_mode = InputMode::ModelAddWizard {
+            provider: "anthropic".into(),
+            step: WizardStep::ModelId,
+            alias: Some("test".into()),
+            model_id: None,
+            api_key: None,
+        };
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.chat_log.iter().any(|e| e.text.contains("cancelled")));
+    }
+
+    #[test]
+    fn wizard_completion_sets_pending() {
+        let mut app = TuiApp::new();
+        app.input_mode = InputMode::ModelAddWizard {
+            provider: "anthropic".into(),
+            step: WizardStep::BaseUrl,
+            alias: Some("my-opus".into()),
+            model_id: Some("claude-opus-4-6".into()),
+            api_key: Some("sk-test".into()),
+        };
+        // Enter with empty base URL (skip) completes the wizard
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.pending_wizard_completion.is_some());
+        let wc = app.pending_wizard_completion.unwrap();
+        assert_eq!(wc.alias, "my-opus");
+        assert_eq!(wc.model_id, "claude-opus-4-6");
+        assert_eq!(wc.api_key, Some("sk-test".into()));
+        assert!(wc.base_url.is_none());
+    }
+
+    #[test]
+    fn wizard_empty_alias_doesnt_advance() {
+        let mut app = TuiApp::new();
+        app.input_mode = InputMode::ModelAddWizard {
+            provider: "anthropic".into(),
+            step: WizardStep::Alias,
+            alias: None,
+            model_id: None,
+            api_key: None,
+        };
+        // Enter with empty input — should NOT advance
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        match &app.input_mode {
+            InputMode::ModelAddWizard { step, .. } => {
+                assert_eq!(*step, WizardStep::Alias); // still on Alias
+            }
+            _ => panic!("should still be in wizard"),
+        }
+    }
+
+    #[test]
+    fn update_wizard_sets_pending() {
+        let mut app = TuiApp::new();
+        app.input_mode = InputMode::ModelUpdateWizard {
+            provider: "anthropic".into(),
+            step: UpdateStep::ApiKey,
+            api_key: None,
+        };
+        type_text(&mut app, "sk-new-key");
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // Should advance to BaseUrl
+        match &app.input_mode {
+            InputMode::ModelUpdateWizard { step, api_key, .. } => {
+                assert_eq!(*step, UpdateStep::BaseUrl);
+                assert_eq!(api_key.as_deref(), Some("sk-new-key"));
+            }
+            _ => panic!("expected UpdateStep::BaseUrl"),
+        }
+
+        // Enter with empty base URL → completes
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.pending_update_completion.is_some());
+        let uc = app.pending_update_completion.unwrap();
+        assert_eq!(uc.provider, "anthropic");
+        assert_eq!(uc.api_key, Some("sk-new-key".into()));
+        assert!(uc.base_url.is_none());
     }
 }

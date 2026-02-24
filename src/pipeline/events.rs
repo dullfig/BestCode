@@ -63,6 +63,26 @@ pub enum PipelineEvent {
         success: bool,
         detail: String,
     },
+    /// Conversation state sync — full conversation for a thread (for TUI display).
+    ConversationSync {
+        thread_id: String,
+        entries: Vec<ConversationEntry>,
+    },
+}
+
+/// A conversation entry for TUI display (lightweight, no raw API content).
+#[derive(Debug, Clone)]
+pub struct ConversationEntry {
+    /// "user", "assistant", or "tool_result"
+    pub role: String,
+    /// Truncated text or tool description.
+    pub summary: String,
+    /// Was this a tool_use block?
+    pub is_tool_use: bool,
+    /// Tool name if this was a tool_use or tool_result.
+    pub tool_name: Option<String>,
+    /// Whether this entry represents an error.
+    pub is_error: bool,
 }
 
 /// Kernel operation types for event reporting.

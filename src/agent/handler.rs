@@ -39,7 +39,7 @@ use crate::librarian::Librarian;
 use crate::llm::types::{ContentBlock, ToolDefinition, ToolResultBlock};
 use crate::llm::LlmPool;
 use crate::organism::AgentConfig;
-use crate::pipeline::events::PipelineEvent;
+use crate::pipeline::events::{ConversationEntry, PipelineEvent};
 use crate::routing::{RouteDecision, SemanticRouter};
 
 use super::state::{AgentState, AgentThread, PendingToolCall};
@@ -213,6 +213,17 @@ impl CodingAgentHandler {
             let _ = tx.send(PipelineEvent::AgentResponse {
                 thread_id: thread_id.to_string(),
                 text: format!("Error: {error}"),
+            });
+        }
+    }
+
+    /// Emit a ConversationSync event with the current thread state.
+    fn maybe_emit_conversation(&self, thread_id: &str, thread: &AgentThread) {
+        if let Some(ref tx) = self.event_tx {
+            let entries = build_conversation_entries(&thread.messages);
+            let _ = tx.send(PipelineEvent::ConversationSync {
+                thread_id: thread_id.to_string(),
+                entries,
             });
         }
     }
@@ -619,6 +630,7 @@ impl Handler for CodingAgentHandler {
 
                     let result = self.dispatch_or_route(thread, action, &[]).await;
                     self.maybe_emit_response(&thread_id, &result);
+                    self.maybe_emit_conversation(&thread_id, thread);
                     result
                 }
                 AgentState::Ready => {
@@ -666,8 +678,78 @@ impl Handler for CodingAgentHandler {
 
             let result = self.dispatch_or_route(thread, action, &[]).await;
             self.maybe_emit_response(&thread_id, &result);
+            self.maybe_emit_conversation(&thread_id, thread);
             result
         }
+    }
+}
+
+/// Convert a slice of Messages into ConversationEntry items for TUI display.
+pub fn build_conversation_entries(messages: &[crate::llm::types::Message]) -> Vec<ConversationEntry> {
+    use crate::llm::types::{ContentBlock, MessageContent};
+    let mut entries = Vec::new();
+    for msg in messages {
+        match &msg.content {
+            MessageContent::Text(text) => {
+                entries.push(ConversationEntry {
+                    role: msg.role.clone(),
+                    summary: truncate_text(text, 200),
+                    is_tool_use: false,
+                    tool_name: None,
+                    is_error: false,
+                });
+            }
+            MessageContent::Blocks(blocks) => {
+                for block in blocks {
+                    match block {
+                        ContentBlock::Text { text } => {
+                            entries.push(ConversationEntry {
+                                role: msg.role.clone(),
+                                summary: truncate_text(text, 200),
+                                is_tool_use: false,
+                                tool_name: None,
+                                is_error: false,
+                            });
+                        }
+                        ContentBlock::ToolUse { name, input, .. } => {
+                            let detail = summarize_tool_input(name, input);
+                            entries.push(ConversationEntry {
+                                role: "assistant".into(),
+                                summary: format!("{name} → {detail}"),
+                                is_tool_use: true,
+                                tool_name: Some(name.clone()),
+                                is_error: false,
+                            });
+                        }
+                        ContentBlock::ToolResult {
+                            content, is_error, ..
+                        } => {
+                            let err = is_error.unwrap_or(false);
+                            let text = content.as_deref().unwrap_or("");
+                            entries.push(ConversationEntry {
+                                role: "tool_result".into(),
+                                summary: truncate_text(text, 120),
+                                is_tool_use: false,
+                                tool_name: None,
+                                is_error: err,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    entries
+}
+
+/// Truncate text to a maximum character count, appending "..." if truncated.
+fn truncate_text(text: &str, max: usize) -> String {
+    // Take first line only for summary
+    let first_line = text.lines().next().unwrap_or(text);
+    if first_line.len() <= max {
+        first_line.to_string()
+    } else {
+        format!("{}...", &first_line[..max.saturating_sub(3)])
     }
 }
 
@@ -1270,5 +1352,100 @@ mod tests {
         let handler = CodingAgentHandler::new(pool, sample_tool_defs(), "test".into())
             .with_router_attached(router);
         assert!(handler.has_semantic_router());
+    }
+
+    // ── ConversationEntry conversion tests ──
+
+    #[test]
+    fn conversation_entry_from_user_message() {
+        use crate::llm::types::Message;
+        let messages = vec![Message::text("user", "Read the README")];
+        let entries = build_conversation_entries(&messages);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].role, "user");
+        assert_eq!(entries[0].summary, "Read the README");
+        assert!(!entries[0].is_tool_use);
+        assert!(entries[0].tool_name.is_none());
+    }
+
+    #[test]
+    fn conversation_entry_from_assistant_text() {
+        use crate::llm::types::Message;
+        let messages = vec![Message::assistant_blocks(vec![ContentBlock::Text {
+            text: "Here's the README contents.".into(),
+        }])];
+        let entries = build_conversation_entries(&messages);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].role, "assistant");
+        assert!(entries[0].summary.contains("README contents"));
+        assert!(!entries[0].is_tool_use);
+    }
+
+    #[test]
+    fn conversation_entry_from_tool_use() {
+        use crate::llm::types::Message;
+        let messages = vec![Message::assistant_blocks(vec![ContentBlock::ToolUse {
+            id: "toolu_1".into(),
+            name: "file-read".into(),
+            input: serde_json::json!({"path": "src/main.rs"}),
+        }])];
+        let entries = build_conversation_entries(&messages);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].role, "assistant");
+        assert!(entries[0].is_tool_use);
+        assert_eq!(entries[0].tool_name.as_deref(), Some("file-read"));
+        assert!(entries[0].summary.contains("file-read"));
+        assert!(entries[0].summary.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn conversation_entry_from_tool_result() {
+        use crate::llm::types::{Message, ToolResultBlock};
+        let messages = vec![Message::tool_results(vec![ToolResultBlock {
+            tool_use_id: "toolu_1".into(),
+            content: "fn main() {}".into(),
+            is_error: false,
+        }])];
+        let entries = build_conversation_entries(&messages);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].role, "tool_result");
+        assert!(!entries[0].is_error);
+        assert!(entries[0].summary.contains("fn main"));
+    }
+
+    #[test]
+    fn conversation_entry_full_conversation() {
+        use crate::llm::types::{Message, ToolResultBlock};
+        let messages = vec![
+            Message::text("user", "Read foo.rs"),
+            Message::assistant_blocks(vec![
+                ContentBlock::Text {
+                    text: "I'll read that file.".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "file-read".into(),
+                    input: serde_json::json!({"path": "foo.rs"}),
+                },
+            ]),
+            Message::tool_results(vec![ToolResultBlock {
+                tool_use_id: "toolu_1".into(),
+                content: "pub fn foo() {}".into(),
+                is_error: false,
+            }]),
+            Message::assistant_blocks(vec![ContentBlock::Text {
+                text: "The file contains a foo function.".into(),
+            }]),
+        ];
+        let entries = build_conversation_entries(&messages);
+        // user(1) + text(1) + tool_use(1) + tool_result(1) + text(1) = 5
+        assert_eq!(entries.len(), 5);
+        assert_eq!(entries[0].role, "user");
+        assert_eq!(entries[1].role, "assistant");
+        assert!(!entries[1].is_tool_use);
+        assert_eq!(entries[2].role, "assistant");
+        assert!(entries[2].is_tool_use);
+        assert_eq!(entries[3].role, "tool_result");
+        assert_eq!(entries[4].role, "assistant");
     }
 }
