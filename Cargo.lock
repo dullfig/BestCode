@@ -18,6 +18,43 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "agentos"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "crc32fast",
+ "crossterm",
+ "glob",
+ "lsp-types",
+ "memmap2",
+ "ratatui",
+ "ratatui-code-editor",
+ "regex",
+ "reqwest",
+ "rust-pipeline",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "similar",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-python 0.25.0",
+ "tree-sitter-rust",
+ "tui-markdown",
+ "tui-menu",
+ "tui-tree-widget",
+ "uuid",
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -176,43 +213,6 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
-
-[[package]]
-name = "bestcode"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "clap",
- "crc32fast",
- "crossterm",
- "glob",
- "lsp-types",
- "memmap2",
- "ratatui",
- "ratatui-code-editor",
- "regex",
- "reqwest",
- "rust-pipeline",
- "serde",
- "serde_json",
- "serde_yaml",
- "similar",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "tree-sitter",
- "tree-sitter-python 0.25.0",
- "tree-sitter-rust",
- "tui-markdown",
- "tui-menu",
- "tui-tree-widget",
- "uuid",
- "wasmtime",
- "wasmtime-wasi",
-]
 
 [[package]]
 name = "bincode"

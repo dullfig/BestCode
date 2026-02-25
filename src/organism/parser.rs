@@ -310,7 +310,7 @@ mod tests {
     fn parse_full_organism() {
         let yaml = r#"
 organism:
-  name: bestcode
+  name: agentos
 
 listeners:
   - name: coding-agent
@@ -353,7 +353,7 @@ profiles:
 "#;
 
         let org = parse_organism(yaml).unwrap();
-        assert_eq!(org.name, "bestcode");
+        assert_eq!(org.name, "agentos");
         assert_eq!(org.listener_names().len(), 4);
 
         // Root profile allows all
@@ -388,7 +388,7 @@ listeners: []
     fn parse_organism_with_ports_and_network() {
         let yaml = r#"
 organism:
-  name: bestcode-m2
+  name: agentos-m2
 
 listeners:
   - name: llm-pool
@@ -426,7 +426,7 @@ profiles:
 "#;
 
         let org = parse_organism(yaml).unwrap();
-        assert_eq!(org.name, "bestcode-m2");
+        assert_eq!(org.name, "agentos-m2");
 
         // LLM pool has port declarations
         let llm = org.get_listener("llm-pool").unwrap();

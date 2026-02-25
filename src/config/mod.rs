@@ -1,7 +1,7 @@
 //! Model configuration — persistent config for providers, models, and API keys.
 //!
-//! User-level config: `~/.bestcode/models.yaml` (providers, keys, models)
-//! Project-level config: `.bestcode/config.yaml` (default model alias only, safe to commit)
+//! User-level config: `~/.agentos/models.yaml` (providers, keys, models)
+//! Project-level config: `.agentos/config.yaml` (default model alias only, safe to commit)
 //!
 //! Resolution: project config → user config → env var fallback → error.
 
@@ -60,19 +60,19 @@ fn user_config_dir() -> Option<PathBuf> {
     dirs_path().map(|p| p.join("models.yaml"))
 }
 
-/// Path to `~/.bestcode/`.
+/// Path to `~/.agentos/`.
 fn dirs_path() -> Option<PathBuf> {
     #[cfg(windows)]
     {
         std::env::var("USERPROFILE")
             .ok()
-            .map(|p| PathBuf::from(p).join(".bestcode"))
+            .map(|p| PathBuf::from(p).join(".agentos"))
     }
     #[cfg(not(windows))]
     {
         std::env::var("HOME")
             .ok()
-            .map(|p| PathBuf::from(p).join(".bestcode"))
+            .map(|p| PathBuf::from(p).join(".agentos"))
     }
 }
 
@@ -131,13 +131,13 @@ impl ModelsConfig {
 
     /// Load just the project-level config file.
     fn load_project_config() -> ProjectConfig {
-        match std::fs::read_to_string(".bestcode/config.yaml") {
+        match std::fs::read_to_string(".agentos/config.yaml") {
             Ok(content) => serde_yaml::from_str(&content).unwrap_or_default(),
             Err(_) => ProjectConfig::default(),
         }
     }
 
-    /// Save user-level config to `~/.bestcode/models.yaml`.
+    /// Save user-level config to `~/.agentos/models.yaml`.
     pub fn save(&self) -> Result<(), String> {
         let Some(dir) = dirs_path() else {
             return Err("Cannot determine home directory".into());
@@ -149,17 +149,17 @@ impl ModelsConfig {
         Ok(())
     }
 
-    /// Save project-level default to `.bestcode/config.yaml`.
+    /// Save project-level default to `.agentos/config.yaml`.
     pub fn save_project_default(&self) -> Result<(), String> {
         let project = ProjectConfig {
             default_model: self.default.clone(),
         };
-        std::fs::create_dir_all(".bestcode")
-            .map_err(|e| format!("Failed to create .bestcode/: {e}"))?;
+        std::fs::create_dir_all(".agentos")
+            .map_err(|e| format!("Failed to create .agentos/: {e}"))?;
         let yaml = serde_yaml::to_string(&project)
             .map_err(|e| format!("YAML serialize error: {e}"))?;
-        std::fs::write(".bestcode/config.yaml", yaml)
-            .map_err(|e| format!("Failed to write .bestcode/config.yaml: {e}"))?;
+        std::fs::write(".agentos/config.yaml", yaml)
+            .map_err(|e| format!("Failed to write .agentos/config.yaml: {e}"))?;
         Ok(())
     }
 

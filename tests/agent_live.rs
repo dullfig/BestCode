@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
-use bestcode::agent::handler::CodingAgentHandler;
-use bestcode::agent::tools::build_tool_definitions;
-use bestcode::llm::types::{ContentBlock, ToolDefinition};
-use bestcode::llm::LlmPool;
+use agentos::agent::handler::CodingAgentHandler;
+use agentos::agent::tools::build_tool_definitions;
+use agentos::llm::types::{ContentBlock, ToolDefinition};
+use agentos::llm::LlmPool;
 use rust_pipeline::prelude::*;
 use tokio::sync::Mutex;
 
@@ -154,7 +154,7 @@ async fn agent_multi_turn_tool_sequence() {
             assert_eq!(to, "file-read");
 
             // Step 2: Simulate the tool response coming back
-            let tool_response = b"<ToolResponse><success>true</success><result># BestCode\n\nAn AI coding agent built on rust-pipeline.\n\n## Features\n- Zero trust pipeline\n- WAL-backed kernel\n- Capability-based security</result></ToolResponse>";
+            let tool_response = b"<ToolResponse><success>true</success><result># AgentOS\n\nAn operating system for AI coding agents.\n\n## Features\n- Zero trust pipeline\n- WAL-backed kernel\n- Capability-based security</result></ToolResponse>";
             let payload2 = ValidatedPayload {
                 xml: tool_response.to_vec(),
                 tag: "ToolResponse".into(),
@@ -176,7 +176,7 @@ async fn agent_multi_turn_tool_sequence() {
                     // The model should mention something about the README content
                     let lower = xml.to_lowercase();
                     assert!(
-                        lower.contains("bestcode")
+                        lower.contains("agentos")
                             || lower.contains("coding")
                             || lower.contains("pipeline")
                             || lower.contains("readme"),
@@ -205,7 +205,7 @@ async fn agent_multi_turn_tool_sequence() {
 fn response_with_text_and_tool_use() {
     // This tests that the types support mixed content blocks
     // (the handler's forgiving ingress behavior is tested in unit tests)
-    let response = bestcode::llm::types::MessagesResponse {
+    let response = agentos::llm::types::MessagesResponse {
         id: "msg_test".into(),
         model: "test".into(),
         content: vec![
@@ -219,7 +219,7 @@ fn response_with_text_and_tool_use() {
             },
         ],
         stop_reason: Some("tool_use".into()),
-        usage: bestcode::llm::types::Usage {
+        usage: agentos::llm::types::Usage {
             input_tokens: 10,
             output_tokens: 10,
         },

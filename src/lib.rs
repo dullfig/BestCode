@@ -1,4 +1,4 @@
-//! BestCode — kernel infrastructure for AgentOS.
+//! AgentOS — kernel infrastructure for AI coding agents.
 //!
 //! Builds on rust-pipeline to add durable state (WAL + mmap),
 //! security profiles, and organism configuration.

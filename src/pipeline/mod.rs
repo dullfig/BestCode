@@ -1,7 +1,7 @@
 //! AgentPipeline — wraps rust-pipeline with kernel integration.
 //!
 //! The adapter pattern: rust-pipeline stays clean as a library,
-//! bestcode adds the kernel layer on top for durability and security.
+//! AgentOS adds the kernel layer on top for durability and security.
 //!
 //! Architecture:
 //! - Builds a `ListenerRegistry` from the Organism configuration
@@ -868,7 +868,7 @@ profiles:
     fn m2_organism() -> Organism {
         let yaml = r#"
 organism:
-  name: bestcode-m2
+  name: agentos-m2
 
 listeners:
   - name: llm-pool
@@ -1209,7 +1209,7 @@ profiles:
     fn p3_organism() -> Organism {
         let yaml = r#"
 organism:
-  name: bestcode-p3
+  name: agentos-p3
 
 listeners:
   - name: llm-pool
@@ -1513,7 +1513,7 @@ profiles:
     fn p4_organism() -> Organism {
         let yaml = r#"
 organism:
-  name: bestcode-p4
+  name: agentos-p4
 
 listeners:
   - name: llm-pool
@@ -1908,7 +1908,7 @@ profiles:
     fn p5_organism() -> Organism {
         let yaml = r#"
 organism:
-  name: bestcode-p5
+  name: agentos-p5
 
 listeners:
   - name: echo
@@ -2385,7 +2385,7 @@ profiles:
     fn routing_organism() -> Organism {
         let yaml = r#"
 organism:
-  name: bestcode-routing
+  name: agentos-routing
 
 listeners:
   - name: llm-pool

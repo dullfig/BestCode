@@ -4,20 +4,20 @@ use anyhow::Result;
 use clap::Parser;
 use tracing::info;
 
-use bestcode::config::ModelsConfig;
-use bestcode::llm::LlmPool;
-use bestcode::organism::parser::parse_organism;
-use bestcode::pipeline::AgentPipelineBuilder;
-use bestcode::tools::{
+use agentos::config::ModelsConfig;
+use agentos::llm::LlmPool;
+use agentos::organism::parser::parse_organism;
+use agentos::pipeline::AgentPipelineBuilder;
+use agentos::tools::{
     command_exec::CommandExecTool, file_edit::FileEditTool, file_read::FileReadTool,
     file_write::FileWriteTool, glob_tool::GlobTool, grep::GrepTool,
 };
-use bestcode::tui::runner::run_tui;
+use agentos::tui::runner::run_tui;
 
 /// Default organism configuration embedded in the binary.
 const DEFAULT_ORGANISM: &str = r#"
 organism:
-  name: bestcode
+  name: agentos
 
 prompts:
   coding_base: |
@@ -102,7 +102,7 @@ listeners:
 
 profiles:
   coding:
-    linux_user: bestcode
+    linux_user: agentos
     listeners: [coding-agent, file-read, file-write, file-edit, glob, grep, command-exec, codebase-index, llm-pool, librarian]
     network: [llm-pool]
     journal: retain_forever
@@ -120,7 +120,7 @@ impl<T> ToAnyhow<T> for std::result::Result<T, String> {
 }
 
 #[derive(Parser)]
-#[command(name = "bestcode", about = "AI coding agent. No compaction, ever.")]
+#[command(name = "agentos", about = "An operating system for AI coding agents. No compaction, ever.")]
 struct Cli {
     /// Working directory (defaults to current)
     #[arg(short, long)]
@@ -134,7 +134,7 @@ struct Cli {
     #[arg(short, long)]
     organism: Option<String>,
 
-    /// Kernel data directory (default: .bestcode/)
+    /// Kernel data directory (default: .agentos/)
     #[arg(long)]
     data: Option<String>,
 
@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
     let model = cli
         .model
         .unwrap_or_else(|| "sonnet".into());
-    let data_rel = cli.data.unwrap_or_else(|| ".bestcode".into());
+    let data_rel = cli.data.unwrap_or_else(|| ".agentos".into());
     let data_dir = PathBuf::from(&work_dir).join(&data_rel);
 
     // Set working directory
@@ -161,17 +161,17 @@ async fn main() -> Result<()> {
     // Initialize tracing to file (avoid polluting the TUI)
     let log_dir = PathBuf::from(&data_rel);
     std::fs::create_dir_all(&log_dir)?;
-    let log_file = std::fs::File::create(log_dir.join("bestcode.log"))?;
+    let log_file = std::fs::File::create(log_dir.join("agentos.log"))?;
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("bestcode=info".parse()?),
+                .add_directive("agentos=info".parse()?),
         )
         .with_writer(log_file)
         .with_ansi(false)
         .init();
 
-    info!("BestCode starting in {work_dir}");
+    info!("AgentOS starting in {work_dir}");
 
     // Parse organism config
     let yaml = if let Some(ref path) = cli.organism {
@@ -243,7 +243,7 @@ async fn main() -> Result<()> {
 
     // Initialize root thread
     pipeline
-        .initialize_root("bestcode", "coding")
+        .initialize_root("agentos", "coding")
         .await
         .to_anyhow()?;
 

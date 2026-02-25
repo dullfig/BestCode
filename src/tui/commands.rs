@@ -50,7 +50,7 @@ pub static COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/exit",
         aliases: &["/quit"],
-        description: "Quit BestCode",
+        description: "Quit AgentOS",
         has_arg: false,
         args: &[],
         subcommands: &[],

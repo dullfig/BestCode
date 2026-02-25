@@ -36,7 +36,7 @@ fn dispatch_menu_action(app: &mut TuiApp, action: MenuAction) {
         MenuAction::ShowAbout => {
             app.chat_log.push(ChatEntry {
                 role: "system".into(),
-                text: "BestCode — an AI coding agent built on rust-pipeline.\nNo compaction, ever."
+                text: "AgentOS — an operating system for AI coding agents.\nNo compaction, ever."
                     .into(),
             });
             app.message_auto_scroll = true;

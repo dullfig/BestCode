@@ -1,8 +1,8 @@
 [package]
-name = "bestcode"
+name = "agentos"
 version = "0.1.0"
 edition = "2021"
-description = "An AI coding agent built on rust-pipeline. No compaction, ever."
+description = "An operating system for AI coding agents. No compaction, ever."
 authors = ["Daniel Ullfig <dullfig@github.com>"]
 
 [dependencies]

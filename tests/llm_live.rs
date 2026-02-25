@@ -3,8 +3,8 @@
 //! Requires ANTHROPIC_API_KEY in the environment. Skips gracefully if unset.
 //! Uses Haiku — cheapest model, ~0.001 cent per call.
 
-use bestcode::llm::LlmPool;
-use bestcode::llm::types::{ContentBlock, Message, ToolDefinition};
+use agentos::llm::LlmPool;
+use agentos::llm::types::{ContentBlock, Message, ToolDefinition};
 
 #[tokio::test]
 async fn haiku_round_trip() {

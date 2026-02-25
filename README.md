@@ -1,11 +1,10 @@
-# BestCode
+# AgentOS
 
 An operating system for AI coding agents — not a framework, not a library, not a tool.
 
-BestCode is the runtime kernel of [AgentOS](https://github.com/dullfig): complete,
-secure, validated infrastructure where AI agents read, write, search, and execute
-with the same guarantees an OS provides to processes. Every message is untrusted.
-Every capability is structural. Every state change is durable.
+AgentOS is complete, secure, validated infrastructure where AI agents read, write,
+search, and execute with the same guarantees an OS provides to processes. Every
+message is untrusted. Every capability is structural. Every state change is durable.
 
 Built on [rust-pipeline](https://github.com/dullfig/rust-pipeline), a zero-trust
 async message pipeline where handler responses re-enter as untrusted bytes —
@@ -70,12 +69,12 @@ cargo run
 ### CLI
 
 ```
-bestcode [OPTIONS]
+agentos [OPTIONS]
 
   -d, --dir <DIR>            Working directory (default: current)
   -m, --model <MODEL>        Model alias (default: sonnet)
   -o, --organism <ORGANISM>  Path to organism.yaml (default: embedded)
-      --data <DATA>          Kernel data directory (default: .bestcode/)
+      --data <DATA>          Kernel data directory (default: .agentos/)
       --debug                Enable debug tab (activity trace)
 ```
 
@@ -181,7 +180,7 @@ Forgetting is the primary feature of functional memory.
 Multi-provider support (Anthropic, OpenAI, Ollama) with persistent config:
 
 ```yaml
-# ~/.bestcode/models.yaml
+# ~/.agentos/models.yaml
 providers:
   anthropic:
     api_key: sk-ant-...
@@ -225,7 +224,7 @@ Menu bar (F10) with dropdown navigation and Alt+letter accelerators.
 | `organism/` | YAML config: listeners, profiles, prompts, agent config, WASM config |
 | `security/` | Dispatch table enforcement, profile resolution |
 | `llm/` | Anthropic API client, LlmPool, model aliasing, list models API |
-| `config/` | Multi-provider model config (`~/.bestcode/models.yaml`) |
+| `config/` | Multi-provider model config (`~/.agentos/models.yaml`) |
 | `tools/` | Six native tool peers: file-read, file-write, file-edit, glob, grep, command-exec |
 | `wasm/` | WASM+WIT component runtime, capability-based sandboxing |
 | `librarian/` | Haiku-powered context curation, relevance-based paging |

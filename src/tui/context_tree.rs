@@ -2,7 +2,7 @@
 //!
 //! Renders context segments as a collapsible tree:
 //! ```text
-//! Thread: system.bestcode.coding-agent
+//! Thread: system.agentos.coding-agent
 //!  [v] Active (3 segments, 4.2 KB)
 //!      message:msg-001  [||||    ] 0.95  "Read src/main.rs"
 //!      code:src/main.rs [|||     ] 0.87  fn main() { ... }
