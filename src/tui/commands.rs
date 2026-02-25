@@ -155,7 +155,7 @@ pub fn suggest(input: &str) -> Option<&'static SlashCommand> {
 
     // Exact match on name or alias (with possible trailing space/args)
     for cmd in COMMANDS {
-        if cmd.name == cmd_part || cmd.aliases.iter().any(|a| *a == cmd_part) {
+        if cmd.name == cmd_part || cmd.aliases.contains(&cmd_part) {
             return Some(cmd);
         }
     }

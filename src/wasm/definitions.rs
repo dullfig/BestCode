@@ -12,6 +12,7 @@ use super::error::WasmError;
 use super::runtime::ToolMetadata;
 
 /// Registry of auto-generated tool definitions from WASM components.
+#[derive(Default)]
 pub struct WasmToolRegistry {
     tools: HashMap<String, ToolDefinition>,
     tag_map: HashMap<String, String>, // tool name → XML request tag
@@ -19,10 +20,7 @@ pub struct WasmToolRegistry {
 
 impl WasmToolRegistry {
     pub fn new() -> Self {
-        Self {
-            tools: HashMap::new(),
-            tag_map: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Register a WASM tool's metadata, generating a ToolDefinition.

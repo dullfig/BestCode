@@ -11,6 +11,7 @@ use serde_yaml::Value;
 use super::{HoverInfo, LanguageService};
 
 /// Language service for organism YAML configuration files.
+#[derive(Default)]
 pub struct OrganismYamlService;
 
 impl OrganismYamlService {
@@ -648,7 +649,7 @@ fn complete_keys(keys: &[&str], prefix: &str) -> Vec<CompletionItem> {
         .map(|k| CompletionItem {
             label: format!("{k}:"),
             kind: Some(CompletionItemKind::FIELD),
-            detail: Some(format!("organism YAML key")),
+            detail: Some("organism YAML key".to_string()),
             insert_text: Some(format!("{k}: ")),
             ..Default::default()
         })

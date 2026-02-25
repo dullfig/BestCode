@@ -132,15 +132,11 @@ impl Handler for CommandExecTool {
                     "exit_code: {exit_code}\nstdout:\n{stdout}\nstderr:\n{stderr}"
                 );
 
-                if exit_code == 0 {
-                    Ok(HandlerResponse::Reply {
-                        payload_xml: ToolResponse::ok(&response),
-                    })
-                } else {
-                    Ok(HandlerResponse::Reply {
-                        payload_xml: ToolResponse::ok(&response),
-                    })
-                }
+                // Report both success and non-zero exit as OK — the caller
+                // sees the exit_code in the response text and decides.
+                Ok(HandlerResponse::Reply {
+                    payload_xml: ToolResponse::ok(&response),
+                })
             }
             Ok(Err(e)) => Ok(HandlerResponse::Reply {
                 payload_xml: ToolResponse::err(&format!("execution error: {e}")),
@@ -323,7 +319,7 @@ mod tests {
         };
         // The cmd wrapper means the first token check matters
         // We need a command whose first token is allowed
-        let xml = format!("<CommandExecRequest><command>{cmd}</command></CommandExecRequest>");
+        let _xml = format!("<CommandExecRequest><command>{cmd}</command></CommandExecRequest>");
 
         // On Windows, "cmd" is not in the allowlist, but our shell wraps it anyway.
         // Let's use a valid allowed command that exits nonzero

@@ -112,23 +112,18 @@ pub async fn run_tui(pipeline: &AgentPipeline, debug: bool, organism_yaml: &str,
     // events accumulate, burn select iterations, and starve the render branch.
     let (key_tx, mut key_rx) = tokio::sync::mpsc::channel::<Event>(32);
     tokio::task::spawn_blocking(move || {
-        loop {
-            match event::read() {
-                Ok(ev) => {
-                    // Only forward Press events — drop Release/Repeat before they
-                    // enter the channel. Non-key events (mouse, resize) pass through.
-                    let dominated = matches!(
-                        &ev,
-                        Event::Key(k) if k.kind != KeyEventKind::Press
-                    );
-                    if dominated {
-                        continue;
-                    }
-                    if key_tx.blocking_send(ev).is_err() {
-                        break; // receiver dropped, TUI is shutting down
-                    }
-                }
-                Err(_) => break,
+        while let Ok(ev) = event::read() {
+            // Only forward Press events — drop Release/Repeat before they
+            // enter the channel. Non-key events (mouse, resize) pass through.
+            let dominated = matches!(
+                &ev,
+                Event::Key(k) if k.kind != KeyEventKind::Press
+            );
+            if dominated {
+                continue;
+            }
+            if key_tx.blocking_send(ev).is_err() {
+                break; // receiver dropped, TUI is shutting down
             }
         }
     });

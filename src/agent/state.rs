@@ -38,13 +38,19 @@ pub struct PendingToolCall {
     pub input: serde_json::Value,
 }
 
-impl AgentThread {
-    /// Create a new thread with initial system state.
-    pub fn new() -> Self {
+impl Default for AgentThread {
+    fn default() -> Self {
         Self {
             messages: Vec::new(),
             state: AgentState::Ready,
         }
+    }
+}
+
+impl AgentThread {
+    /// Create a new thread with initial system state.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Add a user message to the conversation.

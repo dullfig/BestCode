@@ -173,16 +173,12 @@ pub fn strip_xml_fencing(text: &str) -> String {
     let trimmed = text.trim();
 
     // Handle ```xml ... ``` or ``` ... ```
-    if trimmed.starts_with("```") {
-        let without_opening = if trimmed.starts_with("```xml") {
-            &trimmed[6..]
-        } else {
-            &trimmed[3..]
-        };
-        let without_closing = without_opening
-            .trim()
-            .strip_suffix("```")
-            .unwrap_or(without_opening.trim());
+    if let Some(rest) = trimmed.strip_prefix("```xml") {
+        let without_closing = rest.trim().strip_suffix("```").unwrap_or(rest.trim());
+        return without_closing.trim().to_string();
+    }
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        let without_closing = rest.trim().strip_suffix("```").unwrap_or(rest.trim());
         return without_closing.trim().to_string();
     }
 
@@ -208,7 +204,7 @@ pub fn validate_xml(xml: &str, expected_root_tag: &str) -> Result<(), String> {
 
     if !trimmed.starts_with(&expected_open) {
         // Try to extract actual root tag for error message
-        if let Some(end) = trimmed.find(|c: char| c == '>' || c == ' ') {
+        if let Some(end) = trimmed.find(['>', ' ']) {
             let actual = &trimmed[1..end];
             return Err(format!(
                 "expected root tag <{expected_root_tag}>, got <{actual}>"

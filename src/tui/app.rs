@@ -547,8 +547,7 @@ impl TuiApp {
             // End: if same position, mark whole line
             let end_char = if start_line == end_line && d.range.start.character == d.range.end.character {
                 // Mark to end of line
-                let line_end = code.line_to_char(start_line) + code.line_len(start_line);
-                line_end
+                code.line_to_char(start_line) + code.line_len(start_line)
             } else {
                 let el = end_line.min(line_count.saturating_sub(1));
                 code.line_to_char(el) + d.range.end.character as usize

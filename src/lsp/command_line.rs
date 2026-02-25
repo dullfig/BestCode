@@ -54,7 +54,7 @@ pub fn parse_input(input: &str) -> InputContext<'_> {
 
     // Find matching command (exact match on name or alias)
     let cmd = COMMANDS.iter().find(|c| {
-        c.name == cmd_token || c.aliases.iter().any(|a| *a == cmd_token)
+        c.name == cmd_token || c.aliases.contains(&cmd_token)
     });
 
     let Some(cmd) = cmd else {
@@ -103,6 +103,7 @@ pub fn parse_input(input: &str) -> InputContext<'_> {
 }
 
 /// Language service for the command-line input bar.
+#[derive(Default)]
 pub struct CommandLineService;
 
 impl CommandLineService {
@@ -126,7 +127,7 @@ impl LanguageService for CommandLineService {
 
         let cmd_token = tokens[0];
         let cmd = COMMANDS.iter().find(|c| {
-            c.name == cmd_token || c.aliases.iter().any(|a| *a == cmd_token)
+            c.name == cmd_token || c.aliases.contains(&cmd_token)
         });
 
         if cmd.is_none() {
@@ -273,9 +274,7 @@ impl LanguageService for CommandLineService {
             .iter()
             .position(|(start, token)| col >= *start && col <= start + token.len());
 
-        let Some(token_index) = token_index else {
-            return None;
-        };
+        let token_index = token_index?;
 
         if token_index == 0 {
             // Hovering over command name
@@ -314,7 +313,7 @@ impl LanguageService for CommandLineService {
             // Hovering over an argument
             let cmd_token = tokens[0].1;
             let cmd = COMMANDS.iter().find(|c| {
-                c.name == cmd_token || c.aliases.iter().any(|a| *a == cmd_token)
+                c.name == cmd_token || c.aliases.contains(&cmd_token)
             })?;
 
             let arg_index = token_index - 1;

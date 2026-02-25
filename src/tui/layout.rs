@@ -324,7 +324,7 @@ fn draw_ghost_text(f: &mut Frame, app: &TuiApp, area: Rect) {
 
 fn draw_threads(f: &mut Frame, app: &mut TuiApp, area: Rect) {
     // Three-pane vertical split: thread list, conversation, context tree
-    let thread_rows = (app.threads.len() as u16 + 2).min(7).max(3);
+    let thread_rows = (app.threads.len() as u16 + 2).clamp(3, 7);
     let ctx_rows = 7u16; // collapsed context tree
     let chunks = Layout::default()
         .direction(Direction::Vertical)
