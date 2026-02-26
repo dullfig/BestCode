@@ -10,6 +10,8 @@ pub mod file_write;
 pub mod glob_tool;
 pub mod grep;
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use rust_pipeline::prelude::*;
 
@@ -28,6 +30,34 @@ pub trait ToolPeer: Handler {
 
     /// XML schema for this tool's response payload.
     fn response_schema(&self) -> &str;
+}
+
+/// Schema for the shared ToolResponse envelope.
+/// Registered at pipeline build time so validate_stage enforces it on re-entry.
+pub fn tool_response_schema() -> PayloadSchema {
+    let mut fields = HashMap::new();
+    fields.insert(
+        "success".into(),
+        FieldSchema {
+            required: true,
+            field_type: FieldType::String,
+        },
+    );
+    PayloadSchema {
+        root_tag: "ToolResponse".into(),
+        fields,
+        strict: false, // allows <result> or <error> child
+    }
+}
+
+/// Schema for the AgentResponse envelope.
+/// Registered at pipeline build time so validate_stage enforces it on re-entry.
+pub fn agent_response_schema() -> PayloadSchema {
+    PayloadSchema {
+        root_tag: "AgentResponse".into(),
+        fields: HashMap::new(),
+        strict: false, // allows <result> or <error> child
+    }
 }
 
 /// Standard tool response envelope.
@@ -85,6 +115,36 @@ pub fn xml_unescape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_response_schema_validates_ok() {
+        let schema = tool_response_schema();
+        let xml = b"<ToolResponse><success>true</success><result>done</result></ToolResponse>";
+        rust_pipeline::validation::validate_payload(xml, &schema).unwrap();
+    }
+
+    #[test]
+    fn tool_response_schema_rejects_missing_success() {
+        let schema = tool_response_schema();
+        let xml = b"<ToolResponse><result>oops</result></ToolResponse>";
+        let err = rust_pipeline::validation::validate_payload(xml, &schema);
+        assert!(err.is_err(), "should reject ToolResponse without <success>");
+    }
+
+    #[test]
+    fn agent_response_schema_validates_ok() {
+        let schema = agent_response_schema();
+        let xml = b"<AgentResponse><result>hello</result></AgentResponse>";
+        rust_pipeline::validation::validate_payload(xml, &schema).unwrap();
+    }
+
+    #[test]
+    fn agent_response_schema_rejects_wrong_root() {
+        let schema = agent_response_schema();
+        let xml = b"<WrongTag><result>hello</result></WrongTag>";
+        let err = rust_pipeline::validation::validate_payload(xml, &schema);
+        assert!(err.is_err(), "should reject wrong root tag");
+    }
 
     #[test]
     fn tool_response_ok() {

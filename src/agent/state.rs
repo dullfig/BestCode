@@ -11,6 +11,8 @@ pub struct AgentThread {
     pub messages: Vec<Message>,
     /// Current state in the agentic loop.
     pub state: AgentState,
+    /// Counter for the global agentic loop (Opus→tool→Opus cycles).
+    pub agentic_iterations: usize,
 }
 
 /// State machine for the agentic loop.
@@ -43,6 +45,7 @@ impl Default for AgentThread {
         Self {
             messages: Vec::new(),
             state: AgentState::Ready,
+            agentic_iterations: 0,
         }
     }
 }
@@ -104,6 +107,7 @@ mod tests {
         let thread = AgentThread::new();
         assert!(thread.messages.is_empty());
         assert!(matches!(thread.state, AgentState::Ready));
+        assert_eq!(thread.agentic_iterations, 0);
     }
 
     #[test]

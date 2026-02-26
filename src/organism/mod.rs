@@ -25,8 +25,10 @@ pub struct AgentConfig {
     pub prompt: Option<String>,
     /// Max tokens for LLM completion.
     pub max_tokens: u32,
-    /// Max agentic loop iterations.
-    pub max_iterations: usize,
+    /// Max semantic routing iterations per turn.
+    pub max_routing_iterations: usize,
+    /// Max global agentic loop iterations (Opus→tool→Opus cycles).
+    pub max_agentic_iterations: usize,
     /// Model override. None = pool default.
     pub model: Option<String>,
 }
@@ -36,7 +38,8 @@ impl Default for AgentConfig {
         Self {
             prompt: None,
             max_tokens: 4096,
-            max_iterations: 5,
+            max_routing_iterations: 5,
+            max_agentic_iterations: 25,
             model: None,
         }
     }
@@ -492,14 +495,16 @@ mod tests {
         def.agent_config = Some(AgentConfig {
             prompt: Some("my_prompt".into()),
             max_tokens: 8192,
-            max_iterations: 10,
+            max_routing_iterations: 10,
+            max_agentic_iterations: 30,
             model: Some("haiku".into()),
         });
 
         let cfg = def.agent_config.as_ref().unwrap();
         assert_eq!(cfg.prompt.as_deref(), Some("my_prompt"));
         assert_eq!(cfg.max_tokens, 8192);
-        assert_eq!(cfg.max_iterations, 10);
+        assert_eq!(cfg.max_routing_iterations, 10);
+        assert_eq!(cfg.max_agentic_iterations, 30);
         assert_eq!(cfg.model.as_deref(), Some("haiku"));
     }
 
@@ -508,7 +513,8 @@ mod tests {
         let cfg = AgentConfig::default();
         assert_eq!(cfg.prompt, None);
         assert_eq!(cfg.max_tokens, 4096);
-        assert_eq!(cfg.max_iterations, 5);
+        assert_eq!(cfg.max_routing_iterations, 5);
+        assert_eq!(cfg.max_agentic_iterations, 25);
         assert_eq!(cfg.model, None);
     }
 

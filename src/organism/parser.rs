@@ -77,6 +77,8 @@ struct AgentConfigYaml {
     #[serde(default)]
     max_iterations: Option<usize>,
     #[serde(default)]
+    max_agentic_iterations: Option<usize>,
+    #[serde(default)]
     model: Option<String>,
 }
 
@@ -207,7 +209,8 @@ pub fn parse_organism(yaml: &str) -> Result<Organism, String> {
                 let config = AgentConfig {
                     prompt: cfg.prompt,
                     max_tokens: cfg.max_tokens.unwrap_or(4096),
-                    max_iterations: cfg.max_iterations.unwrap_or(5),
+                    max_routing_iterations: cfg.max_iterations.unwrap_or(5),
+                    max_agentic_iterations: cfg.max_agentic_iterations.unwrap_or(25),
                     model: cfg.model,
                 };
                 (true, Some(config))
@@ -732,7 +735,8 @@ profiles:
         let cfg = agent.agent_config.as_ref().unwrap();
         assert_eq!(cfg.prompt.as_deref(), Some("safety & coding_base"));
         assert_eq!(cfg.max_tokens, 8192);
-        assert_eq!(cfg.max_iterations, 10);
+        assert_eq!(cfg.max_routing_iterations, 10);
+        assert_eq!(cfg.max_agentic_iterations, 25);
         assert_eq!(cfg.model.as_deref(), Some("haiku"));
     }
 
@@ -764,7 +768,8 @@ profiles:
         let cfg = agent.agent_config.as_ref().unwrap();
         assert_eq!(cfg.prompt, None);
         assert_eq!(cfg.max_tokens, 4096);
-        assert_eq!(cfg.max_iterations, 5);
+        assert_eq!(cfg.max_routing_iterations, 5);
+        assert_eq!(cfg.max_agentic_iterations, 25);
         assert_eq!(cfg.model, None);
     }
 
@@ -822,8 +827,38 @@ profiles:
         assert_eq!(cfg.prompt.as_deref(), Some("my_prompt"));
         // Defaults
         assert_eq!(cfg.max_tokens, 4096);
-        assert_eq!(cfg.max_iterations, 5);
+        assert_eq!(cfg.max_routing_iterations, 5);
+        assert_eq!(cfg.max_agentic_iterations, 25);
         assert_eq!(cfg.model, None);
+    }
+
+    #[test]
+    fn parse_max_agentic_iterations() {
+        let yaml = r#"
+organism:
+  name: test-agentic
+
+listeners:
+  - name: agent
+    payload_class: agent.Task
+    handler: agent.handle
+    description: "Agent"
+    agent:
+      prompt: "my_prompt"
+      max_iterations: 8
+      max_agentic_iterations: 50
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [agent]
+    journal: retain_forever
+"#;
+        let org = parse_organism(yaml).unwrap();
+        let agent = org.get_listener("agent").unwrap();
+        let cfg = agent.agent_config.as_ref().unwrap();
+        assert_eq!(cfg.max_routing_iterations, 8);
+        assert_eq!(cfg.max_agentic_iterations, 50);
     }
 
     #[test]

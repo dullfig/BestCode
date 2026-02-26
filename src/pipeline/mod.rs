@@ -622,7 +622,17 @@ impl AgentPipelineBuilder {
     }
 
     /// Build the AgentPipeline.
-    pub fn build(self) -> Result<AgentPipeline, String> {
+    pub fn build(mut self) -> Result<AgentPipeline, String> {
+        // Register response schemas so validate_stage enforces them on re-entry.
+        // Handler responses are re-injected as untrusted bytes — these schemas
+        // ensure malformed responses are rejected at the validation gate.
+        self.registry
+            .schemas
+            .register(crate::tools::tool_response_schema());
+        self.registry
+            .schemas
+            .register(crate::tools::agent_response_schema());
+
         let kernel =
             Kernel::open(&self.data_dir).map_err(|e| format!("kernel open failed: {e}"))?;
 

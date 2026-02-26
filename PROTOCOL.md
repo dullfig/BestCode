@@ -17,14 +17,14 @@ is an envelope.
 
 ### 1.1 Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `namespace` | URI | Identifies the schema family (e.g., `urn:agentos:tools:v1`) |
+| Field         | Type   | Description                                                  |
+| ------------- | ------ | ------------------------------------------------------------ |
+| `namespace`   | URI    | Identifies the schema family (e.g., `urn:agentos:tools:v1`)  |
 | `payload_tag` | string | Discriminator for the payload type (e.g., `FileReadRequest`) |
-| `payload` | bytes | Opaque content. Interpreted only by the recipient handler. |
-| `sender` | string | Name of the originating handler or external source |
-| `thread_id` | string | Thread context for this message (see Section 5) |
-| `profile` | string | Security profile governing dispatch (see Section 8) |
+| `payload`     | bytes  | Opaque content. Interpreted only by the recipient handler.   |
+| `sender`      | string | Name of the originating handler or external source           |
+| `thread_id`   | string | Thread context for this message (see Section 5)              |
+| `profile`     | string | Security profile governing dispatch (see Section 8)          |
 
 ### 1.2 Guarantees
 
@@ -103,10 +103,12 @@ handle(payload, context) → Response
 ```
 
 Where:
+
 - `payload` — validated payload bytes + tag
 - `context` — thread_id, sender name, own name (the handler's registered name)
 
 Response is one of:
+
 - **Reply** — send payload back to the sender (reversed routing)
 - **Send** — send payload to a named handler (forward routing)
 - **Broadcast** — send payload to multiple named handlers
@@ -119,6 +121,7 @@ Response is one of:
 ### 3.2 Handler Metadata
 
 Every handler MUST provide:
+
 - **name** — unique identifier within the pipeline
 - **description** — human-readable purpose (used by semantic routing)
 - **payload_tag** — the tag this handler accepts
@@ -126,6 +129,7 @@ Every handler MUST provide:
 - **response_schema** — schema for the payload it produces (SHOULD be provided)
 
 Handlers MAY provide:
+
 - **semantic_description** — extended natural-language description for
   embedding-based routing (see Section 10)
 - **usage_instructions** — guidance for agents on when/how to invoke
@@ -184,6 +188,7 @@ isolation and enable recursive composition.
 ### 5.1 Thread Identifiers
 
 Thread IDs are dot-separated hierarchical paths:
+
 ```
 root
 root.task-1
@@ -201,13 +206,13 @@ root.task-1.subtask-a.subtask-a    (recursion)
 
 ### 5.3 Thread Properties
 
-| Property | Description |
-|----------|-------------|
-| `thread_id` | Hierarchical path |
-| `profile` | Security profile (dispatch table selection) |
-| `state` | Active, Completed, Failed |
-| `parent` | Parent thread ID (None for root) |
-| `children` | Child thread IDs |
+| Property    | Description                                 |
+| ----------- | ------------------------------------------- |
+| `thread_id` | Hierarchical path                           |
+| `profile`   | Security profile (dispatch table selection) |
+| `state`     | Active, Completed, Failed                   |
+| `parent`    | Parent thread ID (None for root)            |
+| `children`  | Child thread IDs                            |
 
 ### 5.4 Guarantee: Turing Completeness
 
@@ -231,30 +236,31 @@ the agent can "see" during inference.
 
 ### 6.1 Three-Tier Model
 
-| Tier | Description | Analogous To |
-|------|-------------|--------------|
-| **Expanded** | Full content, actively in the attention window | RAM |
-| **Folded** | Summary replaces full content; original on disk | Swap |
-| **Evicted** | On disk only; not visible to the agent | Cold storage |
+| Tier         | Description                                     | Analogous To |
+| ------------ | ----------------------------------------------- | ------------ |
+| **Expanded** | Full content, actively in the attention window  | RAM          |
+| **Folded**   | Summary replaces full content; original on disk | Swap         |
+| **Evicted**  | On disk only; not visible to the agent          | Cold storage |
 
 ### 6.2 Context Segments
 
 A **segment** is the unit of context management:
 
-| Field | Description |
-|-------|-------------|
-| `id` | Unique identifier |
-| `thread_id` | Which thread owns this segment |
-| `content` | Full content (when expanded) or summary (when folded) |
-| `content_type` | Classification (message, code, tool_result, etc.) |
-| `relevance` | Numeric score (0.0–1.0) relative to current task |
-| `status` | Expanded, Folded, or Evicted |
-| `byte_size` | Size of full content |
-| `token_estimate` | Estimated tokens (for budget management) |
+| Field            | Description                                           |
+| ---------------- | ----------------------------------------------------- |
+| `id`             | Unique identifier                                     |
+| `thread_id`      | Which thread owns this segment                        |
+| `content`        | Full content (when expanded) or summary (when folded) |
+| `content_type`   | Classification (message, code, tool_result, etc.)     |
+| `relevance`      | Numeric score (0.0–1.0) relative to current task      |
+| `status`         | Expanded, Folded, or Evicted                          |
+| `byte_size`      | Size of full content                                  |
+| `token_estimate` | Estimated tokens (for budget management)              |
 
 ### 6.3 Context Curation (The Librarian)
 
 An automated curator manages context tier transitions:
+
 - **Fold** when relevance drops below threshold
 - **Evict** when total context exceeds budget
 - **Unfold** when a folded segment becomes relevant again
@@ -295,24 +301,24 @@ The journal is not mandatory-forever — it is mandatory-configurable.
 
 ### 7.1 Retention Policies
 
-| Policy | Description | Use Case |
-|--------|-------------|----------|
-| `retain_forever` | Never delete | Coding agents (full history) |
-| `prune_on_delivery` | Delete after handler confirms receipt | Stateless tools |
-| `retain_days(N)` | Delete after N days | Compliance requirements |
+| Policy              | Description                           | Use Case                     |
+| ------------------- | ------------------------------------- | ---------------------------- |
+| `retain_forever`    | Never delete                          | Coding agents (full history) |
+| `prune_on_delivery` | Delete after handler confirms receipt | Stateless tools              |
+| `retain_days(N)`    | Delete after N days                   | Compliance requirements      |
 
 ### 7.2 Journal Entry Fields
 
-| Field | Description |
-|-------|-------------|
-| `id` | Monotonically increasing sequence number |
-| `timestamp` | Wall-clock time of entry |
-| `thread_id` | Thread context |
-| `direction` | Inbound (received) or Outbound (sent) |
-| `handler` | Handler that produced/consumed this message |
-| `payload_tag` | Discriminator |
-| `payload_hash` | Integrity hash of payload content |
-| `retention` | Active retention policy |
+| Field          | Description                                 |
+| -------------- | ------------------------------------------- |
+| `id`           | Monotonically increasing sequence number    |
+| `timestamp`    | Wall-clock time of entry                    |
+| `thread_id`    | Thread context                              |
+| `direction`    | Inbound (received) or Outbound (sent)       |
+| `handler`      | Handler that produced/consumed this message |
+| `payload_tag`  | Discriminator                               |
+| `payload_hash` | Integrity hash of payload content           |
+| `retention`    | Active retention policy                     |
 
 ### 7.3 Guarantee: Append-Only
 
@@ -346,6 +352,7 @@ communicate with the kernel only through the pipeline's message protocol.
 ### 8.4 Profiles
 
 A **profile** defines:
+
 - Which handlers are accessible (the dispatch table)
 - Which handlers may access the network (port allowlist)
 - The journal retention policy
@@ -367,11 +374,13 @@ commands, network requests). They don't think — they execute.
 ### 9.1 Tool Peer Contract
 
 A tool MUST provide:
+
 - Handler metadata (Section 3.2)
 - **Request schema** — defines the payload structure it accepts
 - **Response schema** — defines the payload structure it produces
 
 A tool response is always one of:
+
 - **Success** — result payload
 - **Error** — structured error with message
 
@@ -382,6 +391,7 @@ definitions (e.g., a derive macro, decorator, or code generator).
 Hand-written schemas are acceptable but error-prone.
 
 The derived schema serves three purposes:
+
 1. **Validation** — reject malformed payloads before the tool sees them
 2. **Documentation** — self-describing tools (no separate docs to maintain)
 3. **Agent prompting** — schemas are injected into the agent's system
@@ -439,6 +449,7 @@ Agent: "delete the temp files"
 ```
 
 This ordering is critical:
+
 1. **Rank** — similarity search produces scored candidates
 2. **Mask** — dispatch table removes disallowed handlers
 3. **Select** — top remaining candidate proceeds to form-filling
@@ -500,9 +511,11 @@ requires a configuration entry and a prompt template. No code changes.
 ### 11.3 Prompt Composition
 
 Prompts are named blocks that can be composed:
+
 ```
 "no_paperclipper & coding_base"
 ```
+
 This concatenates the `no_paperclipper` and `coding_base` prompt blocks
 with a newline separator. Prompts support template variables
 (e.g., `{tool_definitions}`) interpolated at runtime.
@@ -534,16 +547,17 @@ prompts, and wiring. It is the single source of truth.
 
 ### 12.1 Configuration Scope
 
-| Section | Contents |
-|---------|----------|
-| `organism.name` | Pipeline instance identity |
-| `prompts` | Named prompt blocks (inline or file reference) |
-| `listeners` | Handler declarations with metadata |
-| `profiles` | Security profiles (dispatch tables, network, journal) |
+| Section         | Contents                                              |
+| --------------- | ----------------------------------------------------- |
+| `organism.name` | Pipeline instance identity                            |
+| `prompts`       | Named prompt blocks (inline or file reference)        |
+| `listeners`     | Handler declarations with metadata                    |
+| `profiles`      | Security profiles (dispatch tables, network, journal) |
 
 ### 12.2 Listener Declaration
 
 Each listener declares:
+
 - `name` — unique handler identifier
 - `payload_class` — the payload tag it handles
 - `handler` — implementation reference
@@ -578,6 +592,7 @@ security via the WIT (WebAssembly Interface Type) system.
 ### 13.1 Capability Model
 
 A WASM tool declares its required capabilities in its WIT interface:
+
 ```wit
 interface my-tool {
     use wasi:filesystem/types.{descriptor}
@@ -657,6 +672,7 @@ listeners:
 ### 15.2 Cross-Organism Dispatch
 
 When organism A calls organism B as a tool:
+
 1. A's agent constructs a tool call (standard tool protocol)
 2. The pipeline translates to B's `AgentTask` format
 3. B executes independently (own threads, own context, own profile)

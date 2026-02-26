@@ -45,6 +45,7 @@ listeners:
     agent:
       prompt: "no_paperclipper & coding_base"
       max_tokens: 4096
+      max_agentic_iterations: 25
     librarian: true
     peers: [file-read, file-write, file-edit, glob, grep, command-exec, codebase-index]
 

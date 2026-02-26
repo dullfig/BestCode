@@ -65,6 +65,8 @@ pub struct CodingAgentHandler {
     semantic_router: Option<SemanticRouter>,
     /// Maximum routing iterations per turn (prevents infinite loops).
     max_routing_iterations: usize,
+    /// Maximum global agentic loop iterations (Opus→tool→Opus cycles).
+    max_agentic_iterations: usize,
     /// Optional event sender for emitting AgentResponse events to the TUI.
     event_tx: Option<broadcast::Sender<PipelineEvent>>,
     /// Max tokens for LLM completion (from AgentConfig).
@@ -78,6 +80,9 @@ pub type AgentHandler = CodingAgentHandler;
 
 /// Default max routing iterations per turn.
 const DEFAULT_MAX_ROUTING_ITERATIONS: usize = 5;
+
+/// Default max agentic loop iterations (Opus→tool→Opus cycles).
+const DEFAULT_MAX_AGENTIC_ITERATIONS: usize = 25;
 
 impl CodingAgentHandler {
     /// Create a new coding agent handler.
@@ -94,6 +99,7 @@ impl CodingAgentHandler {
             system_prompt,
             semantic_router: None,
             max_routing_iterations: DEFAULT_MAX_ROUTING_ITERATIONS,
+            max_agentic_iterations: DEFAULT_MAX_AGENTIC_ITERATIONS,
             event_tx: None,
             max_tokens: 4096,
             model: None,
@@ -114,7 +120,8 @@ impl CodingAgentHandler {
             threads: Arc::new(Mutex::new(HashMap::new())),
             system_prompt,
             semantic_router: None,
-            max_routing_iterations: config.max_iterations,
+            max_routing_iterations: config.max_routing_iterations,
+            max_agentic_iterations: config.max_agentic_iterations,
             event_tx: None,
             max_tokens: config.max_tokens,
             model: config.model.clone(),
@@ -136,6 +143,7 @@ impl CodingAgentHandler {
             system_prompt,
             semantic_router: None,
             max_routing_iterations: DEFAULT_MAX_ROUTING_ITERATIONS,
+            max_agentic_iterations: DEFAULT_MAX_AGENTIC_ITERATIONS,
             event_tx: None,
             max_tokens: 4096,
             model: None,
@@ -157,6 +165,7 @@ impl CodingAgentHandler {
             system_prompt,
             semantic_router: Some(router),
             max_routing_iterations: DEFAULT_MAX_ROUTING_ITERATIONS,
+            max_agentic_iterations: DEFAULT_MAX_AGENTIC_ITERATIONS,
             event_tx: None,
             max_tokens: 4096,
             model: None,
@@ -225,6 +234,27 @@ impl CodingAgentHandler {
                 thread_id: thread_id.to_string(),
                 entries,
             });
+        }
+    }
+
+    /// Increment agentic iteration counter and check limit.
+    /// Returns a reply if the limit is exceeded.
+    fn check_agentic_limit(&self, thread: &mut AgentThread) -> Option<HandlerResult> {
+        thread.agentic_iterations += 1;
+        if thread.agentic_iterations > self.max_agentic_iterations {
+            let msg = format!(
+                "Agentic iteration limit reached ({} iterations). Stopping to prevent runaway loop.",
+                self.max_agentic_iterations
+            );
+            let reply_xml = format!(
+                "<AgentResponse><result>{}</result></AgentResponse>",
+                translate::xml_escape_text(&msg)
+            );
+            Some(Ok(HandlerResponse::Reply {
+                payload_xml: reply_xml.into_bytes(),
+            }))
+        } else {
+            None
         }
     }
 
@@ -450,6 +480,11 @@ impl CodingAgentHandler {
                     "<{tool_name}_result>{result_xml}</{tool_name}_result>"
                 ));
 
+                // Check agentic iteration limit before calling Opus
+                if let Some(result) = self.check_agentic_limit(thread) {
+                    return result;
+                }
+
                 // Call Opus again — it sees the result in context
                 let response = self
                     .call_opus(thread)
@@ -479,6 +514,11 @@ impl CodingAgentHandler {
                 // Record assistant's text + failure note
                 thread.push_assistant_blocks(blocks);
                 thread.push_user_message(&format!("<system_note>{note}</system_note>"));
+
+                // Check agentic iteration limit before calling Opus
+                if let Some(result) = self.check_agentic_limit(thread) {
+                    return result;
+                }
 
                 // Call Opus again with the failure note
                 let response = self
@@ -608,6 +648,13 @@ impl Handler for CodingAgentHandler {
                         thread_id: thread_id.clone(),
                     });
 
+                    // Check agentic iteration limit before calling Opus
+                    if let Some(result) = self.check_agentic_limit(thread) {
+                        self.maybe_emit_response(&thread_id, &result);
+                        self.maybe_emit_conversation(&thread_id, thread);
+                        return result;
+                    }
+
                     let response = match self.call_opus(thread).await {
                         Ok(r) => r,
                         Err(e) => {
@@ -655,6 +702,13 @@ impl Handler for CodingAgentHandler {
             self.maybe_emit(PipelineEvent::AgentThinking {
                 thread_id: thread_id.clone(),
             });
+
+            // Check agentic iteration limit before calling Opus
+            if let Some(result) = self.check_agentic_limit(thread) {
+                self.maybe_emit_response(&thread_id, &result);
+                self.maybe_emit_conversation(&thread_id, thread);
+                return result;
+            }
 
             let response = match self.call_opus(thread).await {
                 Ok(r) => r,
@@ -1296,6 +1350,7 @@ mod tests {
         assert_eq!(handler.max_tokens, 4096);
         assert_eq!(handler.model, None);
         assert_eq!(handler.max_routing_iterations, 5);
+        assert_eq!(handler.max_agentic_iterations, 25);
         assert_eq!(handler.system_prompt, "test prompt");
     }
 
@@ -1352,6 +1407,69 @@ mod tests {
         let handler = CodingAgentHandler::new(pool, sample_tool_defs(), "test".into())
             .with_router_attached(router);
         assert!(handler.has_semantic_router());
+    }
+
+    // ── Agentic iteration limit tests ──
+
+    #[test]
+    fn from_config_reads_max_agentic_iterations() {
+        let pool = mock_pool();
+        let config = AgentConfig {
+            max_agentic_iterations: 50,
+            ..AgentConfig::default()
+        };
+        let handler = CodingAgentHandler::from_config(
+            pool,
+            sample_tool_defs(),
+            "test".into(),
+            &config,
+        );
+        assert_eq!(handler.max_agentic_iterations, 50);
+    }
+
+    #[test]
+    fn check_agentic_limit_increments_counter() {
+        let pool = mock_pool();
+        let handler = CodingAgentHandler::new(pool, sample_tool_defs(), "test".into());
+        let mut thread = AgentThread::new();
+        assert_eq!(thread.agentic_iterations, 0);
+
+        let result = handler.check_agentic_limit(&mut thread);
+        assert!(result.is_none());
+        assert_eq!(thread.agentic_iterations, 1);
+    }
+
+    #[test]
+    fn check_agentic_limit_returns_reply_at_limit() {
+        let pool = mock_pool();
+        let config = AgentConfig {
+            max_agentic_iterations: 2,
+            ..AgentConfig::default()
+        };
+        let handler = CodingAgentHandler::from_config(
+            pool,
+            sample_tool_defs(),
+            "test".into(),
+            &config,
+        );
+        let mut thread = AgentThread::new();
+
+        // Iteration 1: ok
+        assert!(handler.check_agentic_limit(&mut thread).is_none());
+        // Iteration 2: ok (at limit, not over)
+        assert!(handler.check_agentic_limit(&mut thread).is_none());
+        // Iteration 3: over limit — should return reply
+        let result = handler.check_agentic_limit(&mut thread);
+        assert!(result.is_some());
+        let reply = result.unwrap().unwrap();
+        match reply {
+            HandlerResponse::Reply { payload_xml } => {
+                let xml = String::from_utf8(payload_xml).unwrap();
+                assert!(xml.contains("iteration limit reached"));
+                assert!(xml.contains("AgentResponse"));
+            }
+            _ => panic!("expected Reply"),
+        }
     }
 
     // ── ConversationEntry conversion tests ──
