@@ -90,16 +90,11 @@ impl ToolPeer for WasmToolPeer {
         &self.metadata.name
     }
 
-    fn description(&self) -> &str {
-        &self.metadata.description
-    }
-
-    fn request_schema(&self) -> &str {
-        &self.metadata.request_schema
-    }
-
-    fn response_schema(&self) -> &str {
-        &self.metadata.response_schema
+    fn wit(&self) -> &str {
+        // WASM tools get schemas from component metadata, not WIT text.
+        // register_tool() detects the empty string and falls back to
+        // the WasmToolRegistry path for ToolDefinitions.
+        ""
     }
 }
 
@@ -211,21 +206,10 @@ mod tests {
     }
 
     #[test]
-    fn peer_description() {
+    fn peer_wit_empty_for_wasm() {
         let (_rt, peer) = load_echo_peer();
-        assert!(peer.description().contains("Echo"));
-    }
-
-    #[test]
-    fn peer_request_schema() {
-        let (_rt, peer) = load_echo_peer();
-        assert!(peer.request_schema().contains("EchoRequest"));
-    }
-
-    #[test]
-    fn peer_response_schema() {
-        let (_rt, peer) = load_echo_peer();
-        assert!(peer.response_schema().contains("ToolResponse"));
+        // WASM tools return empty WIT — schemas come from component metadata
+        assert!(peer.wit().is_empty());
     }
 
     #[tokio::test]

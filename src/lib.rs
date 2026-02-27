@@ -19,3 +19,4 @@ pub mod tools;
 pub mod treesitter;
 pub mod tui;
 pub mod wasm;
+pub mod wit;

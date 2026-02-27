@@ -107,36 +107,21 @@ impl ToolPeer for FileReadTool {
         "file-read"
     }
 
-    fn description(&self) -> &str {
-        "Read file contents with line numbers"
+    fn wit(&self) -> &str {
+        r#"
+/// Read file contents with line numbers. Supports offset and limit for large files. Detects binary files.
+interface file-read {
+    record request {
+        /// The file path to read
+        path: string,
+        /// Starting line number (1-based, default: 1)
+        offset: option<u32>,
+        /// Maximum lines to read (default: 2000)
+        limit: option<u32>,
     }
-
-    fn request_schema(&self) -> &str {
-        r#"<xs:schema>
-  <xs:element name="FileReadRequest">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="path" type="xs:string"/>
-        <xs:element name="offset" type="xs:integer" minOccurs="0"/>
-        <xs:element name="limit" type="xs:integer" minOccurs="0"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#
-    }
-
-    fn response_schema(&self) -> &str {
-        r#"<xs:schema>
-  <xs:element name="ToolResponse">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="success" type="xs:boolean"/>
-        <xs:element name="result" type="xs:string" minOccurs="0"/>
-        <xs:element name="error" type="xs:string" minOccurs="0"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#
+    read: func(req: request) -> result<string, string>;
+}
+"#
     }
 }
 
@@ -295,7 +280,9 @@ mod tests {
     fn file_read_metadata() {
         let tool = FileReadTool;
         assert_eq!(tool.name(), "file-read");
-        assert!(!tool.description().is_empty());
-        assert!(tool.request_schema().contains("FileReadRequest"));
+        let iface = crate::wit::parser::parse_wit(tool.wit()).unwrap();
+        assert_eq!(iface.name, "file-read");
+        assert_eq!(iface.request_tag(), "FileReadRequest");
+        assert!(iface.request.fields.iter().any(|f| f.name == "path"));
     }
 }

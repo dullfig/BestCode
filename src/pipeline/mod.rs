@@ -25,6 +25,8 @@ use crate::agent::handler::CodingAgentHandler;
 use crate::agent::prompts;
 use crate::agent::tools as agent_tools;
 use crate::embedding::tfidf::TfIdfProvider;
+use crate::tools::ToolPeer;
+use crate::wit::ToolInterface;
 use crate::embedding::EmbeddingIndex;
 use crate::kernel::Kernel;
 use crate::librarian::handler::LibrarianHandler;
@@ -239,6 +241,9 @@ pub struct AgentPipelineBuilder {
     semantic_router: Option<SemanticRouter>,
     /// Event channel created early so handlers can emit events.
     event_tx: broadcast::Sender<PipelineEvent>,
+    /// WIT-parsed tool interfaces, keyed by tool name.
+    /// Stored at `register_tool()` time, consumed by `with_agents()`.
+    tool_interfaces: std::collections::HashMap<String, ToolInterface>,
 }
 
 impl AgentPipelineBuilder {
@@ -257,7 +262,50 @@ impl AgentPipelineBuilder {
             wasm_registry: None,
             semantic_router: None,
             event_tx,
+            tool_interfaces: std::collections::HashMap::new(),
         }
+    }
+
+    /// Register a tool-peer handler for a listener defined in the organism.
+    ///
+    /// Parses the tool's WIT interface at registration time to derive:
+    /// - PayloadSchema registered in the schema registry for validation
+    /// - ToolInterface stored for later ToolDefinition generation by `with_agents()`
+    ///
+    /// For WASM tools with empty WIT, falls back to schema-free registration.
+    pub fn register_tool<T: ToolPeer>(mut self, listener_name: &str, tool: T) -> Result<Self, String> {
+        let wit_str = tool.wit();
+        if wit_str.is_empty() {
+            // WASM tools — no WIT text, fall back to regular register
+            return self.register(listener_name, tool);
+        }
+
+        let iface = crate::wit::parser::parse_wit(wit_str)
+            .map_err(|e| format!("WIT parse error for '{}': {}", listener_name, e))?;
+
+        let schema = iface.to_payload_schema();
+
+        // Store the interface for later ToolDefinition generation
+        self.tool_interfaces.insert(tool.name().to_string(), iface);
+
+        // Register handler with its validated schema
+        let def = self
+            .organism
+            .get_listener(listener_name)
+            .ok_or_else(|| format!("listener '{listener_name}' not in organism config"))?
+            .clone();
+
+        self.registry.register(
+            &def.name,
+            &def.payload_tag,
+            tool,
+            def.is_agent,
+            def.peers.clone(),
+            &def.description,
+            Some(schema),
+        );
+
+        Ok(self)
     }
 
     /// Register a handler for a listener defined in the organism.
@@ -539,13 +587,23 @@ impl AgentPipelineBuilder {
         let mut router_opt = self.semantic_router.take();
 
         for def in &agent_defs {
-            // Build tool definitions from the listener's declared peers,
-            // with WASM registry fallback for dynamic tools
-            let peer_names: Vec<&str> = def.peers.iter().map(|s| s.as_str()).collect();
-            let tool_definitions = agent_tools::build_tool_definitions_with_wasm(
-                &peer_names,
-                self.wasm_registry.as_ref(),
-            );
+            // Build tool definitions from WIT interfaces (registered via register_tool),
+            // with hand-written fallback for tools without WIT, then WASM registry fallback
+            let mut tool_definitions = Vec::new();
+            for peer_name in &def.peers {
+                if let Some(iface) = self.tool_interfaces.get(peer_name.as_str()) {
+                    // WIT-derived definition — single source of truth
+                    tool_definitions.push(iface.to_tool_definition());
+                } else if let Some(hand_def) = agent_tools::definition_for_peer(peer_name) {
+                    // Fallback to hand-written definition (backward compat)
+                    tool_definitions.push(hand_def);
+                } else if let Some(ref reg) = self.wasm_registry {
+                    // WASM registry fallback
+                    if let Some(wasm_def) = reg.definition_for(peer_name) {
+                        tool_definitions.push(wasm_def.clone());
+                    }
+                }
+            }
 
             // Build tool descriptions for prompt interpolation
             let tool_descs: Vec<(String, String)> = tool_definitions
@@ -941,12 +999,12 @@ profiles:
         builder: AgentPipelineBuilder,
     ) -> Result<AgentPipelineBuilder, String> {
         builder
-            .register("file-read", crate::tools::file_read::FileReadTool)?
-            .register("file-write", crate::tools::file_write::FileWriteTool)?
-            .register("file-edit", crate::tools::file_edit::FileEditTool)?
-            .register("glob", crate::tools::glob_tool::GlobTool)?
-            .register("grep", crate::tools::grep::GrepTool)?
-            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)?
+            .register_tool("file-write", crate::tools::file_write::FileWriteTool)?
+            .register_tool("file-edit", crate::tools::file_edit::FileEditTool)?
+            .register_tool("glob", crate::tools::glob_tool::GlobTool)?
+            .register_tool("grep", crate::tools::grep::GrepTool)?
+            .register_tool("command-exec", crate::tools::command_exec::CommandExecTool::new())
     }
 
     #[tokio::test]
@@ -989,17 +1047,17 @@ profiles:
         let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
             .unwrap()
-            .register("file-read", crate::tools::file_read::FileReadTool)
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
-            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .register_tool("file-write", crate::tools::file_write::FileWriteTool)
             .unwrap()
-            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .register_tool("file-edit", crate::tools::file_edit::FileEditTool)
             .unwrap()
-            .register("glob", crate::tools::glob_tool::GlobTool)
+            .register_tool("glob", crate::tools::glob_tool::GlobTool)
             .unwrap()
-            .register("grep", crate::tools::grep::GrepTool)
+            .register_tool("grep", crate::tools::grep::GrepTool)
             .unwrap()
-            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
+            .register_tool("command-exec", crate::tools::command_exec::CommandExecTool::new())
             .unwrap()
             .with_port_manager()
             .unwrap()
@@ -1053,17 +1111,17 @@ profiles:
         let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
             .unwrap()
-            .register("file-read", crate::tools::file_read::FileReadTool)
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
-            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .register_tool("file-write", crate::tools::file_write::FileWriteTool)
             .unwrap()
-            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .register_tool("file-edit", crate::tools::file_edit::FileEditTool)
             .unwrap()
-            .register("glob", crate::tools::glob_tool::GlobTool)
+            .register_tool("glob", crate::tools::glob_tool::GlobTool)
             .unwrap()
-            .register("grep", crate::tools::grep::GrepTool)
+            .register_tool("grep", crate::tools::grep::GrepTool)
             .unwrap()
-            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
+            .register_tool("command-exec", crate::tools::command_exec::CommandExecTool::new())
             .unwrap()
             .with_port_manager()
             .unwrap()
@@ -1191,17 +1249,17 @@ profiles:
         let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
             .unwrap()
-            .register("file-read", crate::tools::file_read::FileReadTool)
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
-            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .register_tool("file-write", crate::tools::file_write::FileWriteTool)
             .unwrap()
-            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .register_tool("file-edit", crate::tools::file_edit::FileEditTool)
             .unwrap()
-            .register("glob", crate::tools::glob_tool::GlobTool)
+            .register_tool("glob", crate::tools::glob_tool::GlobTool)
             .unwrap()
-            .register("grep", crate::tools::grep::GrepTool)
+            .register_tool("grep", crate::tools::grep::GrepTool)
             .unwrap()
-            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
+            .register_tool("command-exec", crate::tools::command_exec::CommandExecTool::new())
             .unwrap()
             .with_port_manager()
             .unwrap();
@@ -1339,17 +1397,17 @@ profiles:
             .unwrap()
             .with_code_index()
             .unwrap()
-            .register("file-read", crate::tools::file_read::FileReadTool)
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
-            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .register_tool("file-write", crate::tools::file_write::FileWriteTool)
             .unwrap()
-            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .register_tool("file-edit", crate::tools::file_edit::FileEditTool)
             .unwrap()
-            .register("glob", crate::tools::glob_tool::GlobTool)
+            .register_tool("glob", crate::tools::glob_tool::GlobTool)
             .unwrap()
-            .register("grep", crate::tools::grep::GrepTool)
+            .register_tool("grep", crate::tools::grep::GrepTool)
             .unwrap()
-            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
+            .register_tool("command-exec", crate::tools::command_exec::CommandExecTool::new())
             .unwrap();
 
         // Librarian should be attached
@@ -1378,17 +1436,17 @@ profiles:
             .unwrap()
             .with_code_index()
             .unwrap()
-            .register("file-read", crate::tools::file_read::FileReadTool)
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
-            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .register_tool("file-write", crate::tools::file_write::FileWriteTool)
             .unwrap()
-            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .register_tool("file-edit", crate::tools::file_edit::FileEditTool)
             .unwrap()
-            .register("glob", crate::tools::glob_tool::GlobTool)
+            .register_tool("glob", crate::tools::glob_tool::GlobTool)
             .unwrap()
-            .register("grep", crate::tools::grep::GrepTool)
+            .register_tool("grep", crate::tools::grep::GrepTool)
             .unwrap()
-            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
+            .register_tool("command-exec", crate::tools::command_exec::CommandExecTool::new())
             .unwrap()
             .with_port_manager()
             .unwrap()
@@ -1432,17 +1490,17 @@ profiles:
             .unwrap()
             .with_code_index()
             .unwrap()
-            .register("file-read", crate::tools::file_read::FileReadTool)
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
-            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .register_tool("file-write", crate::tools::file_write::FileWriteTool)
             .unwrap()
-            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .register_tool("file-edit", crate::tools::file_edit::FileEditTool)
             .unwrap()
-            .register("glob", crate::tools::glob_tool::GlobTool)
+            .register_tool("glob", crate::tools::glob_tool::GlobTool)
             .unwrap()
-            .register("grep", crate::tools::grep::GrepTool)
+            .register_tool("grep", crate::tools::grep::GrepTool)
             .unwrap()
-            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
+            .register_tool("command-exec", crate::tools::command_exec::CommandExecTool::new())
             .unwrap()
             .build()
             .unwrap();
@@ -1499,17 +1557,17 @@ profiles:
             .unwrap()
             .with_code_index()
             .unwrap()
-            .register("file-read", crate::tools::file_read::FileReadTool)
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
-            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .register_tool("file-write", crate::tools::file_write::FileWriteTool)
             .unwrap()
-            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .register_tool("file-edit", crate::tools::file_edit::FileEditTool)
             .unwrap()
-            .register("glob", crate::tools::glob_tool::GlobTool)
+            .register_tool("glob", crate::tools::glob_tool::GlobTool)
             .unwrap()
-            .register("grep", crate::tools::grep::GrepTool)
+            .register_tool("grep", crate::tools::grep::GrepTool)
             .unwrap()
-            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
+            .register_tool("command-exec", crate::tools::command_exec::CommandExecTool::new())
             .unwrap();
 
         assert!(builder.code_index.is_some());
@@ -1966,7 +2024,7 @@ profiles:
         let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_wasm_tools(&echo_wasm_dir())
             .unwrap()
-            .register("file-read", crate::tools::file_read::FileReadTool)
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
             .build()
             .unwrap();
@@ -1982,7 +2040,7 @@ profiles:
         let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_wasm_tools(&echo_wasm_dir())
             .unwrap()
-            .register("file-read", crate::tools::file_read::FileReadTool)
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
             .build()
             .unwrap();
@@ -2000,7 +2058,7 @@ profiles:
         let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_wasm_tools(&echo_wasm_dir())
             .unwrap()
-            .register("file-read", crate::tools::file_read::FileReadTool)
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
             .build()
             .unwrap();
@@ -2019,7 +2077,7 @@ profiles:
         let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_wasm_tools(&echo_wasm_dir())
             .unwrap()
-            .register("file-read", crate::tools::file_read::FileReadTool)
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
             .build()
             .unwrap();
@@ -2050,7 +2108,7 @@ profiles:
         let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_wasm_tools(&echo_wasm_dir())
             .unwrap()
-            .register("file-read", crate::tools::file_read::FileReadTool)
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)
             .unwrap();
 
         // WASM registry should have the echo tool definition
@@ -2102,7 +2160,7 @@ profiles:
         let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_wasm_tools(&echo_wasm_dir())
             .unwrap()
-            .register("file-read", crate::tools::file_read::FileReadTool)
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
             .build()
             .unwrap();
@@ -2146,7 +2204,7 @@ profiles:
         let builder = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_wasm_tools(&echo_wasm_dir())
             .unwrap()
-            .register("file-read", crate::tools::file_read::FileReadTool)
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)
             .unwrap();
 
         let reg = builder.wasm_registry.as_ref().unwrap();
@@ -2161,7 +2219,7 @@ profiles:
         let mut pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_wasm_tools(&echo_wasm_dir())
             .unwrap()
-            .register("file-read", crate::tools::file_read::FileReadTool)
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
             .build()
             .unwrap();
@@ -2626,17 +2684,17 @@ profiles:
         let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
             .unwrap()
-            .register("file-read", crate::tools::file_read::FileReadTool)
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
-            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .register_tool("file-write", crate::tools::file_write::FileWriteTool)
             .unwrap()
-            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .register_tool("file-edit", crate::tools::file_edit::FileEditTool)
             .unwrap()
-            .register("glob", crate::tools::glob_tool::GlobTool)
+            .register_tool("glob", crate::tools::glob_tool::GlobTool)
             .unwrap()
-            .register("grep", crate::tools::grep::GrepTool)
+            .register_tool("grep", crate::tools::grep::GrepTool)
             .unwrap()
-            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
+            .register_tool("command-exec", crate::tools::command_exec::CommandExecTool::new())
             .unwrap()
             .with_agents()
             .unwrap()
@@ -2730,17 +2788,17 @@ profiles:
         let pipeline = AgentPipelineBuilder::new(org, &dir.path().join("data"))
             .with_llm_pool(pool)
             .unwrap()
-            .register("file-read", crate::tools::file_read::FileReadTool)
+            .register_tool("file-read", crate::tools::file_read::FileReadTool)
             .unwrap()
-            .register("file-write", crate::tools::file_write::FileWriteTool)
+            .register_tool("file-write", crate::tools::file_write::FileWriteTool)
             .unwrap()
-            .register("file-edit", crate::tools::file_edit::FileEditTool)
+            .register_tool("file-edit", crate::tools::file_edit::FileEditTool)
             .unwrap()
-            .register("glob", crate::tools::glob_tool::GlobTool)
+            .register_tool("glob", crate::tools::glob_tool::GlobTool)
             .unwrap()
-            .register("grep", crate::tools::grep::GrepTool)
+            .register_tool("grep", crate::tools::grep::GrepTool)
             .unwrap()
-            .register("command-exec", crate::tools::command_exec::CommandExecTool::new())
+            .register_tool("command-exec", crate::tools::command_exec::CommandExecTool::new())
             .unwrap()
             .with_coding_agent()
             .unwrap()

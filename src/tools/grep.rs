@@ -159,37 +159,23 @@ impl ToolPeer for GrepTool {
         "grep"
     }
 
-    fn description(&self) -> &str {
-        "Regex search across files"
+    fn wit(&self) -> &str {
+        r#"
+/// Regex search across files. Recursively searches directories, skips binary files.
+interface grep {
+    record request {
+        /// Regex pattern to search for
+        pattern: string,
+        /// File or directory to search (default: current directory)
+        path: option<string>,
+        /// Filter files by glob (e.g. *.rs)
+        glob-filter: option<string>,
+        /// Case insensitive search (default: false)
+        case-insensitive: option<bool>,
     }
-
-    fn request_schema(&self) -> &str {
-        r#"<xs:schema>
-  <xs:element name="GrepRequest">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="pattern" type="xs:string"/>
-        <xs:element name="path" type="xs:string" minOccurs="0"/>
-        <xs:element name="glob_filter" type="xs:string" minOccurs="0"/>
-        <xs:element name="case_insensitive" type="xs:boolean" minOccurs="0"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#
-    }
-
-    fn response_schema(&self) -> &str {
-        r#"<xs:schema>
-  <xs:element name="ToolResponse">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="success" type="xs:boolean"/>
-        <xs:element name="result" type="xs:string" minOccurs="0"/>
-        <xs:element name="error" type="xs:string" minOccurs="0"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#
+    search: func(req: request) -> result<string, string>;
+}
+"#
     }
 }
 
@@ -367,7 +353,9 @@ mod tests {
     fn grep_metadata() {
         let tool = GrepTool;
         assert_eq!(tool.name(), "grep");
-        assert!(!tool.description().is_empty());
-        assert!(tool.request_schema().contains("GrepRequest"));
+        let iface = crate::wit::parser::parse_wit(tool.wit()).unwrap();
+        assert_eq!(iface.name, "grep");
+        assert_eq!(iface.request_tag(), "GrepRequest");
+        assert!(iface.request.fields.iter().any(|f| f.name == "pattern"));
     }
 }

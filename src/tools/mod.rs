@@ -17,19 +17,22 @@ use rust_pipeline::prelude::*;
 
 /// Marker trait for tool-peers. All tool-peers are Handlers,
 /// but this trait adds tool-specific metadata for self-documentation.
+///
+/// Each tool declares its interface as a WIT string. The pipeline
+/// builder parses it once at registration time to generate
+/// PayloadSchema, ToolDefinition, and XML tag mapping.
 #[async_trait]
 pub trait ToolPeer: Handler {
     /// Tool name (used in routing).
     fn name(&self) -> &str;
 
-    /// Human-readable description.
-    fn description(&self) -> &str;
-
-    /// XML schema for this tool's request payload (self-documenting).
-    fn request_schema(&self) -> &str;
-
-    /// XML schema for this tool's response payload.
-    fn response_schema(&self) -> &str;
+    /// WIT interface definition for this tool.
+    ///
+    /// The pipeline builder parses this at registration time to derive:
+    /// - PayloadSchema for pipeline validation
+    /// - ToolDefinition (JSON Schema) for the LLM
+    /// - XML request tag for routing
+    fn wit(&self) -> &str;
 }
 
 /// Schema for the shared ToolResponse envelope.

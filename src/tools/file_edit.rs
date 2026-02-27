@@ -107,36 +107,21 @@ impl ToolPeer for FileEditTool {
         "file-edit"
     }
 
-    fn description(&self) -> &str {
-        "Surgical text replacement in files"
+    fn wit(&self) -> &str {
+        r#"
+/// Surgical text replacement in a file. Replaces old_string with new_string. The old_string must match exactly once. Returns unified diff.
+interface file-edit {
+    record request {
+        /// The file path to edit
+        path: string,
+        /// The exact text to find and replace (must be unique in the file)
+        old-string: string,
+        /// The replacement text
+        new-string: string,
     }
-
-    fn request_schema(&self) -> &str {
-        r#"<xs:schema>
-  <xs:element name="FileEditRequest">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="path" type="xs:string"/>
-        <xs:element name="old_string" type="xs:string"/>
-        <xs:element name="new_string" type="xs:string"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#
-    }
-
-    fn response_schema(&self) -> &str {
-        r#"<xs:schema>
-  <xs:element name="ToolResponse">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="success" type="xs:boolean"/>
-        <xs:element name="result" type="xs:string" minOccurs="0"/>
-        <xs:element name="error" type="xs:string" minOccurs="0"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#
+    edit: func(req: request) -> result<string, string>;
+}
+"#
     }
 }
 
@@ -322,7 +307,9 @@ mod tests {
     fn file_edit_metadata() {
         let tool = FileEditTool;
         assert_eq!(tool.name(), "file-edit");
-        assert!(!tool.description().is_empty());
-        assert!(tool.request_schema().contains("FileEditRequest"));
+        let iface = crate::wit::parser::parse_wit(tool.wit()).unwrap();
+        assert_eq!(iface.name, "file-edit");
+        assert_eq!(iface.request_tag(), "FileEditRequest");
+        assert!(iface.request.fields.iter().any(|f| f.name == "path"));
     }
 }

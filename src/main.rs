@@ -225,17 +225,17 @@ async fn main() -> Result<()> {
     let mut pipeline = builder
         .with_code_index()
         .to_anyhow()?
-        .register("file-read", FileReadTool)
+        .register_tool("file-read", FileReadTool)
         .to_anyhow()?
-        .register("file-write", FileWriteTool)
+        .register_tool("file-write", FileWriteTool)
         .to_anyhow()?
-        .register("file-edit", FileEditTool)
+        .register_tool("file-edit", FileEditTool)
         .to_anyhow()?
-        .register("glob", GlobTool)
+        .register_tool("glob", GlobTool)
         .to_anyhow()?
-        .register("grep", GrepTool)
+        .register_tool("grep", GrepTool)
         .to_anyhow()?
-        .register("command-exec", CommandExecTool::new())
+        .register_tool("command-exec", CommandExecTool::new())
         .to_anyhow()?;
     if has_pool {
         pipeline = pipeline.with_agents().to_anyhow()?;

@@ -156,36 +156,21 @@ impl ToolPeer for CommandExecTool {
         "command-exec"
     }
 
-    fn description(&self) -> &str {
-        "Execute allowed shell commands"
+    fn wit(&self) -> &str {
+        r#"
+/// Execute a shell command. Only allowed commands can be run (cargo, git, npm, etc). Captures stdout, stderr, and exit code.
+interface command-exec {
+    record request {
+        /// The command to execute
+        command: string,
+        /// Timeout in seconds (default: 30)
+        timeout: option<u32>,
+        /// Working directory for the command
+        working-dir: option<string>,
     }
-
-    fn request_schema(&self) -> &str {
-        r#"<xs:schema>
-  <xs:element name="CommandExecRequest">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="command" type="xs:string"/>
-        <xs:element name="timeout" type="xs:integer" minOccurs="0"/>
-        <xs:element name="working_dir" type="xs:string" minOccurs="0"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#
-    }
-
-    fn response_schema(&self) -> &str {
-        r#"<xs:schema>
-  <xs:element name="ToolResponse">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="success" type="xs:boolean"/>
-        <xs:element name="result" type="xs:string" minOccurs="0"/>
-        <xs:element name="error" type="xs:string" minOccurs="0"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#
+    exec: func(req: request) -> result<string, string>;
+}
+"#
     }
 }
 
@@ -350,7 +335,9 @@ mod tests {
     fn command_exec_metadata() {
         let tool = CommandExecTool::new();
         assert_eq!(tool.name(), "command-exec");
-        assert!(!tool.description().is_empty());
-        assert!(tool.request_schema().contains("CommandExecRequest"));
+        let iface = crate::wit::parser::parse_wit(tool.wit()).unwrap();
+        assert_eq!(iface.name, "command-exec");
+        assert_eq!(iface.request_tag(), "CommandExecRequest");
+        assert!(iface.request.fields.iter().any(|f| f.name == "command"));
     }
 }

@@ -105,37 +105,23 @@ impl ToolPeer for CodeIndexHandler {
         "codebase-index"
     }
 
-    fn description(&self) -> &str {
-        "Tree-sitter code indexing and symbol search"
+    fn wit(&self) -> &str {
+        r#"
+/// Tree-sitter code indexing: index files/directories, search symbols, or get a codebase map.
+interface codebase-index {
+    record request {
+        /// The indexing operation to perform
+        action: string,
+        /// File or directory path (for index_file, index_directory)
+        path: option<string>,
+        /// Search query (for search action)
+        query: option<string>,
+        /// Symbol kind filter (for search action, e.g. 'function', 'struct')
+        kind: option<string>,
     }
-
-    fn request_schema(&self) -> &str {
-        r#"<xs:schema>
-  <xs:element name="CodeIndexRequest">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="action" type="xs:string"/>
-        <xs:element name="path" type="xs:string" minOccurs="0"/>
-        <xs:element name="query" type="xs:string" minOccurs="0"/>
-        <xs:element name="kind" type="xs:string" minOccurs="0"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#
-    }
-
-    fn response_schema(&self) -> &str {
-        r#"<xs:schema>
-  <xs:element name="ToolResponse">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="success" type="xs:boolean"/>
-        <xs:element name="result" type="xs:string" minOccurs="0"/>
-        <xs:element name="error" type="xs:string" minOccurs="0"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#
+    handle: func(req: request) -> result<string, string>;
+}
+"#
     }
 }
 
@@ -223,6 +209,9 @@ mod tests {
         let index = Arc::new(tokio::sync::Mutex::new(CodeIndex::new()));
         let handler = CodeIndexHandler::new(index);
         assert_eq!(handler.name(), "codebase-index");
-        assert!(handler.request_schema().contains("CodeIndexRequest"));
+        let iface = crate::wit::parser::parse_wit(handler.wit()).unwrap();
+        assert_eq!(iface.name, "codebase-index");
+        assert_eq!(iface.request_tag(), "CodebaseIndexRequest");
+        assert!(iface.request.fields.iter().any(|f| f.name == "action"));
     }
 }

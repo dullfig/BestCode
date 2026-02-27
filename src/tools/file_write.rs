@@ -59,35 +59,19 @@ impl ToolPeer for FileWriteTool {
         "file-write"
     }
 
-    fn description(&self) -> &str {
-        "Write or create files"
+    fn wit(&self) -> &str {
+        r#"
+/// Write or create a file. Auto-creates parent directories.
+interface file-write {
+    record request {
+        /// The file path to write
+        path: string,
+        /// The content to write to the file
+        content: string,
     }
-
-    fn request_schema(&self) -> &str {
-        r#"<xs:schema>
-  <xs:element name="FileWriteRequest">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="path" type="xs:string"/>
-        <xs:element name="content" type="xs:string"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#
-    }
-
-    fn response_schema(&self) -> &str {
-        r#"<xs:schema>
-  <xs:element name="ToolResponse">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="success" type="xs:boolean"/>
-        <xs:element name="result" type="xs:string" minOccurs="0"/>
-        <xs:element name="error" type="xs:string" minOccurs="0"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#
+    write: func(req: request) -> result<string, string>;
+}
+"#
     }
 }
 
@@ -211,7 +195,9 @@ mod tests {
     fn file_write_metadata() {
         let tool = FileWriteTool;
         assert_eq!(tool.name(), "file-write");
-        assert!(!tool.description().is_empty());
-        assert!(tool.request_schema().contains("FileWriteRequest"));
+        let iface = crate::wit::parser::parse_wit(tool.wit()).unwrap();
+        assert_eq!(iface.name, "file-write");
+        assert_eq!(iface.request_tag(), "FileWriteRequest");
+        assert!(iface.request.fields.iter().any(|f| f.name == "path"));
     }
 }

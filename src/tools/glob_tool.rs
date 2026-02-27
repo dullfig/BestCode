@@ -83,35 +83,19 @@ impl ToolPeer for GlobTool {
         "glob"
     }
 
-    fn description(&self) -> &str {
-        "Find files by glob pattern"
+    fn wit(&self) -> &str {
+        r#"
+/// Find files matching a glob pattern (e.g. **/*.rs, src/*.txt).
+interface glob {
+    record request {
+        /// The glob pattern to match (e.g. **/*.rs)
+        pattern: string,
+        /// Base directory for the pattern (default: current directory)
+        base-path: option<string>,
     }
-
-    fn request_schema(&self) -> &str {
-        r#"<xs:schema>
-  <xs:element name="GlobRequest">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="pattern" type="xs:string"/>
-        <xs:element name="base_path" type="xs:string" minOccurs="0"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#
-    }
-
-    fn response_schema(&self) -> &str {
-        r#"<xs:schema>
-  <xs:element name="ToolResponse">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="success" type="xs:boolean"/>
-        <xs:element name="result" type="xs:string" minOccurs="0"/>
-        <xs:element name="error" type="xs:string" minOccurs="0"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#
+    search: func(req: request) -> result<string, string>;
+}
+"#
     }
 }
 
@@ -227,7 +211,9 @@ mod tests {
     fn glob_metadata() {
         let tool = GlobTool;
         assert_eq!(tool.name(), "glob");
-        assert!(!tool.description().is_empty());
-        assert!(tool.request_schema().contains("GlobRequest"));
+        let iface = crate::wit::parser::parse_wit(tool.wit()).unwrap();
+        assert_eq!(iface.name, "glob");
+        assert_eq!(iface.request_tag(), "GlobRequest");
+        assert!(iface.request.fields.iter().any(|f| f.name == "pattern"));
     }
 }
