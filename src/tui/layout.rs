@@ -17,7 +17,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-    Wrap,
 };
 use ratatui::Frame;
 use tui_menu::Menu;
@@ -647,21 +646,27 @@ fn draw_messages(f: &mut Frame, app: &mut TuiApp, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
+    // Inner width for word-wrapping (subtract 2 for block borders)
+    let wrap_width = area.width.saturating_sub(2).max(1) as usize;
+
     let mut lines: Vec<Line> = Vec::new();
+    let mut last_entry_start: u32 = 0;
 
     for entry in &app.chat_log {
+        last_entry_start = lines.len() as u32;
         match entry.role.as_str() {
             "user" => {
                 lines.push(Line::from(""));
-                lines.push(Line::from(vec![
+                let user_line = Line::from(vec![
                     Span::styled(
                         "[You] ",
                         Style::default()
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw(&entry.text),
-                ]));
+                    Span::raw(entry.text.clone()),
+                ]);
+                lines.extend(wrap_line(user_line, wrap_width));
             }
             "agent" => {
                 lines.push(Line::from(""));
@@ -671,15 +676,22 @@ fn draw_messages(f: &mut Frame, app: &mut TuiApp, area: Rect) {
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
                 )]));
-                lines.extend(super::markdown::render_markdown(&entry.text));
+                for line in super::markdown::render_markdown(&entry.text) {
+                    if is_nowrap_line(&line) {
+                        lines.push(line);
+                    } else {
+                        lines.extend(wrap_line(line, wrap_width));
+                    }
+                }
             }
             "system" => {
                 lines.push(Line::from(""));
                 for text_line in entry.text.lines() {
-                    lines.push(Line::from(vec![Span::styled(
+                    let sys_line = Line::from(vec![Span::styled(
                         text_line.to_string(),
                         Style::default().fg(Color::DarkGray),
-                    )]));
+                    )]);
+                    lines.extend(wrap_line(sys_line, wrap_width));
                 }
             }
             _ => {}
@@ -709,25 +721,18 @@ fn draw_messages(f: &mut Frame, app: &mut TuiApp, area: Rect) {
     }
 
     // Clamp scroll so we never scroll past content.
-    // Account for line wrapping: each line may occupy multiple visual rows.
-    // Use u32 to avoid overflow for very long responses (u16 max = 65535 lines).
+    // No wrapping — wide lines (tables, code) clip at the right edge.
+    // Left/Right keys pan horizontally.
     let inner_height = area.height.saturating_sub(2) as u32;
-    let inner_width = area.width.saturating_sub(2).max(1) as usize;
-    let total_lines: u32 = lines
-        .iter()
-        .map(|line| {
-            let width: usize = line.spans.iter().map(|s| s.content.len()).sum();
-            if width == 0 {
-                1u32
-            } else {
-                width.div_ceil(inner_width) as u32
-            }
-        })
-        .sum();
+    let total_lines = lines.len() as u32;
     let max_scroll = total_lines.saturating_sub(inner_height);
-    // Clamp to u16 range for ratatui's scroll API (65535 lines is still enormous)
     let max_scroll_u16 = max_scroll.min(u16::MAX as u32) as u16;
-    let scroll = if app.message_auto_scroll {
+    let scroll = if app.scroll_to_last_entry {
+        // Scroll so the start of the last entry is at the top of the viewport
+        app.scroll_to_last_entry = false;
+        let target = last_entry_start.min(max_scroll);
+        target.min(u16::MAX as u32) as u16
+    } else if app.message_auto_scroll {
         max_scroll_u16
     } else {
         app.message_scroll.min(max_scroll_u16)
@@ -739,8 +744,7 @@ fn draw_messages(f: &mut Frame, app: &mut TuiApp, area: Rect) {
 
     let para = Paragraph::new(lines)
         .block(block)
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+        .scroll((scroll, app.message_h_scroll));
     f.render_widget(para, area);
 
     // Scrollbar
@@ -1036,4 +1040,102 @@ fn draw_status(f: &mut Frame, app: &TuiApp, area: Rect) {
 
     let para = Paragraph::new(status);
     f.render_widget(para, area);
+}
+
+// ─── Selective word-wrapping helpers ────────────────────────────────────────
+
+/// Returns true if a line should NOT be word-wrapped (tables, box-drawing art).
+fn is_nowrap_line(line: &Line) -> bool {
+    const BOX_CHARS: &[char] = &['│', '┌', '┬', '┐', '├', '┼', '┤', '└', '┴', '┘', '─'];
+    line.spans
+        .iter()
+        .any(|s| s.content.chars().any(|c| BOX_CHARS.contains(&c)))
+}
+
+/// Word-wrap a single `Line` at `max_width` display columns, preserving span styles.
+/// Returns the line unchanged if it already fits.
+fn wrap_line(line: Line<'static>, max_width: usize) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthChar;
+    use unicode_width::UnicodeWidthStr;
+
+    if max_width == 0 {
+        return vec![line];
+    }
+
+    // Fast path: line fits — no wrapping needed
+    let total: usize = line.spans.iter().map(|s| s.content.width()).sum();
+    if total <= max_width {
+        return vec![line];
+    }
+
+    let mut result: Vec<Line<'static>> = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = Vec::new();
+    let mut current_width: usize = 0;
+
+    for span in line.spans {
+        let style = span.style;
+        let text: String = span.content.into();
+
+        let mut remaining = text.as_str();
+        while !remaining.is_empty() {
+            let rem_width = remaining.width();
+
+            if current_width + rem_width <= max_width {
+                // Entire remaining text fits on current line
+                current_spans.push(Span::styled(remaining.to_string(), style));
+                current_width += rem_width;
+                break;
+            }
+
+            // Need to split — walk characters to find break point
+            let available = max_width.saturating_sub(current_width);
+            let mut col: usize = 0;
+            let mut byte_at_limit: usize = 0;
+            let mut last_space_byte: Option<usize> = None;
+
+            for (i, ch) in remaining.char_indices() {
+                let ch_w = ch.width().unwrap_or(0);
+                if col + ch_w > available {
+                    break;
+                }
+                col += ch_w;
+                byte_at_limit = i + ch.len_utf8();
+                if ch == ' ' {
+                    last_space_byte = Some(i + ch.len_utf8());
+                }
+            }
+
+            let split_at = last_space_byte.unwrap_or(byte_at_limit);
+
+            if split_at == 0 {
+                if current_spans.is_empty() {
+                    // Can't fit even one char — take one to avoid infinite loop
+                    let ch = remaining.chars().next().unwrap();
+                    current_spans.push(Span::styled(ch.to_string(), style));
+                    remaining = &remaining[ch.len_utf8()..];
+                }
+                // Flush current line
+                result.push(Line::from(std::mem::take(&mut current_spans)));
+                current_width = 0;
+            } else {
+                let (before, after) = remaining.split_at(split_at);
+                if !before.is_empty() {
+                    current_spans.push(Span::styled(before.to_string(), style));
+                }
+                result.push(Line::from(std::mem::take(&mut current_spans)));
+                current_width = 0;
+                remaining = after;
+            }
+        }
+    }
+
+    if !current_spans.is_empty() {
+        result.push(Line::from(current_spans));
+    }
+
+    if result.is_empty() {
+        result.push(Line::from(""));
+    }
+
+    result
 }

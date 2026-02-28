@@ -205,10 +205,14 @@ pub struct TuiApp {
     pub should_quit: bool,
     /// Currently selected thread index.
     pub selected_thread: usize,
-    /// Scroll offset for the messages pane.
+    /// Scroll offset for the messages pane (vertical).
     pub message_scroll: u16,
+    /// Horizontal scroll offset for the messages pane.
+    pub message_h_scroll: u16,
     /// When true, auto-scroll messages to bottom on next render.
     pub message_auto_scroll: bool,
+    /// When true, scroll to the start of the last chat entry on next render.
+    pub scroll_to_last_entry: bool,
     /// Recent pipeline events (ring buffer).
     pub event_log: Vec<PipelineEvent>,
     /// Thread list (refreshed from kernel on tick).
@@ -390,7 +394,9 @@ impl TuiApp {
             should_quit: false,
             selected_thread: 0,
             message_scroll: 0,
+            message_h_scroll: 0,
             message_auto_scroll: true,
+            scroll_to_last_entry: false,
             event_log: Vec::new(),
             threads: Vec::new(),
             messages: Vec::new(),
@@ -679,8 +685,9 @@ impl TuiApp {
                     role: "agent".into(),
                     text: text.clone(),
                 });
-                // Auto-scroll to bottom so latest response is visible
-                self.message_auto_scroll = true;
+                // Scroll to the start of this response, not the bottom
+                self.message_auto_scroll = false;
+                self.scroll_to_last_entry = true;
                 // Complete any pending "thinking" activity
                 self.complete_thinking();
             }
@@ -757,6 +764,16 @@ impl TuiApp {
     pub fn scroll_messages_up(&mut self) {
         self.message_auto_scroll = false;
         self.message_scroll = self.message_scroll.saturating_sub(1);
+    }
+
+    /// Scroll messages pane right.
+    pub fn scroll_messages_right(&mut self) {
+        self.message_h_scroll = self.message_h_scroll.saturating_add(4);
+    }
+
+    /// Scroll messages pane left.
+    pub fn scroll_messages_left(&mut self) {
+        self.message_h_scroll = self.message_h_scroll.saturating_sub(4);
     }
 
     /// Push an activity entry, maintaining ring buffer capacity.

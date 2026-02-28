@@ -470,6 +470,13 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) {
                 app.scroll_activity_down();
             }
         }
+        // Left/Right on Messages tab: horizontal scroll
+        KeyCode::Left if app.active_tab == ActiveTab::Messages => {
+            app.scroll_messages_left();
+        }
+        KeyCode::Right if app.active_tab == ActiveTab::Messages => {
+            app.scroll_messages_right();
+        }
         // Left/Right on ContextTree focus: collapse/expand
         KeyCode::Left
             if app.active_tab == ActiveTab::Threads
@@ -544,6 +551,7 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) {
             }
             _ => {
                 app.message_scroll = 0;
+                app.message_h_scroll = 0;
                 app.message_auto_scroll = false;
             }
         },

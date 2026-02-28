@@ -152,6 +152,12 @@ pub async fn run_tui(
     render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
+        // Check quit FIRST so /exit and Ctrl+C respond immediately,
+        // even if the pipeline is busy with an agent task.
+        if app.should_quit {
+            break;
+        }
+
         tokio::select! {
             _ = tick_interval.tick() => {
                 refresh_from_kernel(&mut app, &kernel).await;
@@ -263,13 +269,11 @@ pub async fn run_tui(
         if let Some(task) = app.pending_task.take() {
             inject_task(pipeline, &kernel, &task, app.selected_agent.as_deref()).await;
         }
-
-        if app.should_quit {
-            break;
-        }
     }
 
-    // Restore terminal
+    // Restore terminal — always runs, even if agent task is mid-flight.
+    // Pipeline tasks are detached (tokio-spawned), so they'll be dropped
+    // when the runtime shuts down.
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
     Ok(())
