@@ -4,6 +4,7 @@
 //! security profiles, and organism configuration.
 
 pub mod agent;
+pub mod buffer;
 pub mod config;
 pub mod embedding;
 pub mod kernel;

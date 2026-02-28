@@ -238,6 +238,8 @@ async fn main() -> Result<()> {
         .register_tool("grep", GrepTool)
         .to_anyhow()?
         .register_tool("command-exec", CommandExecTool::new())
+        .to_anyhow()?
+        .with_buffer_nodes(&PathBuf::from(&work_dir))
         .to_anyhow()?;
     if has_pool {
         pipeline = pipeline.with_agents().to_anyhow()?;

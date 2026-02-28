@@ -9,7 +9,10 @@ use std::path::Path;
 use serde::Deserialize;
 
 use super::profile::{RetentionPolicy, SecurityProfile};
-use super::{AgentConfig, ListenerDef, Organism, PortDef, WasmToolConfig};
+use super::{
+    AgentConfig, BufferConfig, CallableConfig, CallableParam, ListenerDef, Organism, PortDef,
+    WasmToolConfig,
+};
 use crate::wasm::capabilities::{EnvGrant, FsGrant, WasmCapabilities};
 
 /// Top-level YAML structure.
@@ -51,6 +54,10 @@ struct ListenerYaml {
     wasm: Option<WasmYaml>,
     #[serde(default)]
     semantic_description: Option<String>,
+    #[serde(default)]
+    callable: Option<CallableYaml>,
+    #[serde(default)]
+    buffer: Option<BufferYaml>,
 }
 
 /// Agent field: bool or config block (untagged for YAML flexibility).
@@ -111,6 +118,44 @@ struct FsGrantYaml {
 struct EnvGrantYaml {
     key: String,
     value: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CallableYaml {
+    description: String,
+    #[serde(default)]
+    parameters: std::collections::HashMap<String, CallableParamYaml>,
+    #[serde(default)]
+    required: Vec<String>,
+    #[serde(default)]
+    requires: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CallableParamYaml {
+    #[serde(rename = "type")]
+    param_type: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default, rename = "enum")]
+    enum_values: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BufferYaml {
+    organism: String,
+    #[serde(default = "default_max_concurrency")]
+    max_concurrency: usize,
+    #[serde(default = "default_timeout_secs")]
+    timeout_secs: u64,
+}
+
+fn default_max_concurrency() -> usize {
+    5
+}
+
+fn default_timeout_secs() -> u64 {
+    300
 }
 
 #[derive(Debug, Deserialize)]
@@ -264,6 +309,29 @@ pub fn parse_organism(yaml: &str) -> Result<Organism, String> {
                     path: w.path,
                     capabilities: caps,
                 }
+            }),
+            callable: l.callable.map(|c| {
+                let parameters = c
+                    .parameters
+                    .into_iter()
+                    .map(|(name, p)| CallableParam {
+                        name,
+                        param_type: p.param_type,
+                        description: p.description,
+                        enum_values: p.enum_values,
+                    })
+                    .collect();
+                CallableConfig {
+                    description: c.description,
+                    parameters,
+                    required: c.required,
+                    requires: c.requires,
+                }
+            }),
+            buffer: l.buffer.map(|b| BufferConfig {
+                organism: b.organism,
+                max_concurrency: b.max_concurrency,
+                timeout_secs: b.timeout_secs,
             }),
         })?;
     }
@@ -910,5 +978,198 @@ listeners: []
             org.get_prompt("from_file"),
             Some("You are a test prompt from a file.")
         );
+    }
+
+    // ── Buffer Node: callable + buffer parsing ──
+
+    #[test]
+    fn parse_callable_and_buffer() {
+        let yaml = r#"
+organism:
+  name: test-buffer
+
+listeners:
+  - name: email-sender
+    payload_class: buffer.EmailSenderRequest
+    handler: buffer
+    description: "Send marketing email"
+    buffer:
+      organism: email-agent.yaml
+      max_concurrency: 5
+      timeout_secs: 120
+    callable:
+      description: "Send a marketing email to a recipient"
+      parameters:
+        to: { type: string, description: "Recipient email" }
+        subject: { type: string, description: "Subject line" }
+        body: { type: string, description: "Email body" }
+      required: [to, subject, body]
+      requires: [command-exec]
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [email-sender]
+    journal: retain_forever
+"#;
+        let org = parse_organism(yaml).unwrap();
+        let listener = org.get_listener("email-sender").unwrap();
+
+        // callable config
+        let callable = listener.callable.as_ref().unwrap();
+        assert_eq!(callable.description, "Send a marketing email to a recipient");
+        assert_eq!(callable.parameters.len(), 3);
+        assert_eq!(callable.required, vec!["to", "subject", "body"]);
+        assert_eq!(callable.requires, vec!["command-exec"]);
+
+        // Verify params
+        let to_param = callable.parameters.iter().find(|p| p.name == "to").unwrap();
+        assert_eq!(to_param.param_type, "string");
+        assert_eq!(to_param.description.as_deref(), Some("Recipient email"));
+
+        // buffer config
+        let buffer = listener.buffer.as_ref().unwrap();
+        assert_eq!(buffer.organism, "email-agent.yaml");
+        assert_eq!(buffer.max_concurrency, 5);
+        assert_eq!(buffer.timeout_secs, 120);
+    }
+
+    #[test]
+    fn parse_buffer_defaults() {
+        let yaml = r#"
+organism:
+  name: test-buffer-defaults
+
+listeners:
+  - name: worker
+    payload_class: buffer.WorkerRequest
+    handler: buffer
+    description: "Worker"
+    buffer:
+      organism: worker.yaml
+    callable:
+      description: "Run a worker task"
+      parameters:
+        task: { type: string, description: "Task to run" }
+      required: [task]
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [worker]
+    journal: retain_forever
+"#;
+        let org = parse_organism(yaml).unwrap();
+        let listener = org.get_listener("worker").unwrap();
+
+        let buffer = listener.buffer.as_ref().unwrap();
+        assert_eq!(buffer.max_concurrency, 5);
+        assert_eq!(buffer.timeout_secs, 300);
+    }
+
+    #[test]
+    fn parse_no_callable_or_buffer() {
+        let yaml = r#"
+organism:
+  name: test-no-buffer
+
+listeners:
+  - name: echo
+    payload_class: handlers.echo.Greeting
+    handler: handlers.echo.handle
+    description: "Echo"
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [echo]
+    journal: retain_forever
+"#;
+        let org = parse_organism(yaml).unwrap();
+        let echo = org.get_listener("echo").unwrap();
+        assert!(echo.callable.is_none());
+        assert!(echo.buffer.is_none());
+    }
+
+    #[test]
+    fn callable_to_tool_definition() {
+        let yaml = r#"
+organism:
+  name: test-tool-def
+
+listeners:
+  - name: email-sender
+    payload_class: buffer.EmailSenderRequest
+    handler: buffer
+    description: "Send email"
+    buffer:
+      organism: email-agent.yaml
+    callable:
+      description: "Send a marketing email"
+      parameters:
+        to: { type: string, description: "Recipient email" }
+        count: { type: integer, description: "Number of emails" }
+      required: [to]
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [email-sender]
+    journal: retain_forever
+"#;
+        let org = parse_organism(yaml).unwrap();
+        let listener = org.get_listener("email-sender").unwrap();
+        let callable = listener.callable.as_ref().unwrap();
+
+        let tool_def = callable.to_tool_definition("email-sender");
+        assert_eq!(tool_def.name, "email-sender");
+        assert_eq!(tool_def.description, "Send a marketing email");
+
+        // Check JSON Schema structure
+        let schema = tool_def.input_schema.as_object().unwrap();
+        assert_eq!(schema["type"], "object");
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("to"));
+        assert!(props.contains_key("count"));
+        assert_eq!(props["count"]["type"], "integer");
+        let required = schema["required"].as_array().unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0], "to");
+    }
+
+    #[test]
+    fn buffer_listeners_filter() {
+        let yaml = r#"
+organism:
+  name: test-filter
+
+listeners:
+  - name: email-sender
+    payload_class: buffer.EmailSenderRequest
+    handler: buffer
+    description: "Send email"
+    buffer:
+      organism: email-agent.yaml
+    callable:
+      description: "Send email"
+      parameters:
+        to: { type: string }
+      required: [to]
+
+  - name: file-ops
+    payload_class: tools.FileOpsRequest
+    handler: tools.file_ops.handle
+    description: "File ops"
+
+profiles:
+  admin:
+    linux_user: agentos-admin
+    listeners: [email-sender, file-ops]
+    journal: retain_forever
+"#;
+        let org = parse_organism(yaml).unwrap();
+        let buffer_listeners = org.buffer_listeners();
+        assert_eq!(buffer_listeners.len(), 1);
+        assert_eq!(buffer_listeners[0].name, "email-sender");
     }
 }

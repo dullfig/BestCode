@@ -14,17 +14,7 @@
 /// JSON object properties become child XML elements.
 pub fn tool_call_to_xml(tool_name: &str, input: &serde_json::Value) -> String {
     let tag = xml_tag_for_tool(tool_name);
-    let mut xml = format!("<{tag}>");
-
-    if let Some(obj) = input.as_object() {
-        for (key, value) in obj {
-            let text = json_value_to_text(value);
-            xml.push_str(&format!("<{key}>{}</{key}>", xml_escape(&text)));
-        }
-    }
-
-    xml.push_str(&format!("</{tag}>"));
-    xml
+    tool_call_to_xml_with_tag(&tag, input)
 }
 
 /// Parse a pipeline XML tool response into a plain text result.
@@ -46,31 +36,51 @@ pub fn xml_response_to_result(xml: &str) -> (String, bool) {
 }
 
 /// Get the XML request tag name for a tool.
-pub fn xml_tag_for_tool(tool_name: &str) -> &str {
+///
+/// Known tools return static strings. Unknown tools get a dynamic PascalCase
+/// tag derived from the kebab-case name (e.g., "email-sender" → "EmailSenderRequest").
+pub fn xml_tag_for_tool(tool_name: &str) -> String {
     match tool_name {
-        "file-read" => "FileReadRequest",
-        "file-write" => "FileWriteRequest",
-        "file-edit" => "FileEditRequest",
-        "glob" => "GlobRequest",
-        "grep" => "GrepRequest",
-        "command-exec" => "CommandExecRequest",
-        "codebase-index" => "CodeIndexRequest",
-        _ => "UnknownRequest",
+        "file-read" => "FileReadRequest".to_string(),
+        "file-write" => "FileWriteRequest".to_string(),
+        "file-edit" => "FileEditRequest".to_string(),
+        "glob" => "GlobRequest".to_string(),
+        "grep" => "GrepRequest".to_string(),
+        "command-exec" => "CommandExecRequest".to_string(),
+        "codebase-index" => "CodeIndexRequest".to_string(),
+        _ => to_pascal_case_request(tool_name),
     }
 }
 
 /// Get the pipeline payload tag (what the listener is registered with) for a tool.
-pub fn payload_tag_for_tool(tool_name: &str) -> &str {
+pub fn payload_tag_for_tool(tool_name: &str) -> String {
     match tool_name {
-        "file-read" => "FileReadRequest",
-        "file-write" => "FileWriteRequest",
-        "file-edit" => "FileEditRequest",
-        "glob" => "GlobRequest",
-        "grep" => "GrepRequest",
-        "command-exec" => "CommandExecRequest",
-        "codebase-index" => "CodeIndexRequest",
-        _ => "UnknownRequest",
+        "file-read" => "FileReadRequest".to_string(),
+        "file-write" => "FileWriteRequest".to_string(),
+        "file-edit" => "FileEditRequest".to_string(),
+        "glob" => "GlobRequest".to_string(),
+        "grep" => "GrepRequest".to_string(),
+        "command-exec" => "CommandExecRequest".to_string(),
+        "codebase-index" => "CodeIndexRequest".to_string(),
+        _ => to_pascal_case_request(tool_name),
     }
+}
+
+/// Convert a kebab-case tool name to PascalCaseRequest.
+/// "email-sender" → "EmailSenderRequest"
+/// "my-tool" → "MyToolRequest"
+fn to_pascal_case_request(name: &str) -> String {
+    let pascal: String = name
+        .split('-')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(ch) => ch.to_uppercase().to_string() + chars.as_str(),
+            }
+        })
+        .collect();
+    format!("{pascal}Request")
 }
 
 /// Translate a JSON tool call to XML with a custom tag name.
@@ -252,10 +262,11 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tool_tag() {
+    fn unknown_tool_dynamic_pascal_case() {
         let input = serde_json::json!({"x": "y"});
         let xml = tool_call_to_xml("unknown-tool", &input);
-        assert!(xml.starts_with("<UnknownRequest>"));
+        assert!(xml.starts_with("<UnknownToolRequest>"));
+        assert!(xml.ends_with("</UnknownToolRequest>"));
     }
 
     #[test]
@@ -267,7 +278,13 @@ mod tests {
         assert_eq!(xml_tag_for_tool("grep"), "GrepRequest");
         assert_eq!(xml_tag_for_tool("command-exec"), "CommandExecRequest");
         assert_eq!(xml_tag_for_tool("codebase-index"), "CodeIndexRequest");
-        assert_eq!(xml_tag_for_tool("other"), "UnknownRequest");
+    }
+
+    #[test]
+    fn dynamic_pascal_case_tags() {
+        assert_eq!(xml_tag_for_tool("email-sender"), "EmailSenderRequest");
+        assert_eq!(xml_tag_for_tool("my-cool-tool"), "MyCoolToolRequest");
+        assert_eq!(xml_tag_for_tool("simple"), "SimpleRequest");
     }
 
     // ── Phase 5: Dynamic XML tag for WASM tools ──

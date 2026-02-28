@@ -8,6 +8,7 @@ pub mod profile;
 
 use std::collections::HashMap;
 
+use crate::llm::types::ToolDefinition;
 use crate::wasm::capabilities::WasmCapabilities;
 use profile::{DispatchTable, SecurityProfile};
 
@@ -45,6 +46,86 @@ impl Default for AgentConfig {
     }
 }
 
+/// Callable interface — declares a buffer node as a typed tool for LLM invocation.
+#[derive(Debug, Clone)]
+pub struct CallableConfig {
+    pub description: String,
+    pub parameters: Vec<CallableParam>,
+    pub required: Vec<String>,
+    pub requires: Vec<String>,
+}
+
+/// A parameter in a callable interface.
+#[derive(Debug, Clone)]
+pub struct CallableParam {
+    pub name: String,
+    pub param_type: String, // "string", "integer", "boolean"
+    pub description: Option<String>,
+    pub enum_values: Option<Vec<String>>,
+}
+
+/// Buffer node configuration — ephemeral child pipeline lifecycle.
+#[derive(Debug, Clone)]
+pub struct BufferConfig {
+    pub organism: String,    // path to child organism YAML
+    pub max_concurrency: usize, // default 5
+    pub timeout_secs: u64,   // default 300
+}
+
+impl CallableConfig {
+    /// Generate a ToolDefinition (JSON Schema) from this callable config.
+    pub fn to_tool_definition(&self, name: &str) -> ToolDefinition {
+        let mut properties = serde_json::Map::new();
+        for param in &self.parameters {
+            let mut prop = serde_json::Map::new();
+            let json_type = match param.param_type.as_str() {
+                "integer" => "integer",
+                "boolean" => "boolean",
+                "number" => "number",
+                _ => "string",
+            };
+            prop.insert("type".into(), serde_json::Value::String(json_type.into()));
+            if let Some(ref desc) = param.description {
+                prop.insert(
+                    "description".into(),
+                    serde_json::Value::String(desc.clone()),
+                );
+            }
+            if let Some(ref vals) = param.enum_values {
+                prop.insert(
+                    "enum".into(),
+                    serde_json::Value::Array(
+                        vals.iter()
+                            .map(|v| serde_json::Value::String(v.clone()))
+                            .collect(),
+                    ),
+                );
+            }
+            properties.insert(param.name.clone(), serde_json::Value::Object(prop));
+        }
+
+        let required: Vec<serde_json::Value> = self
+            .required
+            .iter()
+            .map(|r| serde_json::Value::String(r.clone()))
+            .collect();
+
+        let mut schema = serde_json::Map::new();
+        schema.insert("type".into(), serde_json::Value::String("object".into()));
+        schema.insert(
+            "properties".into(),
+            serde_json::Value::Object(properties),
+        );
+        schema.insert("required".into(), serde_json::Value::Array(required));
+
+        ToolDefinition {
+            name: name.to_string(),
+            description: self.description.clone(),
+            input_schema: serde_json::Value::Object(schema),
+        }
+    }
+}
+
 /// Port declaration on a listener (from organism config).
 #[derive(Debug, Clone)]
 pub struct PortDef {
@@ -74,6 +155,10 @@ pub struct ListenerDef {
     pub semantic_description: Option<String>,
     /// Agent configuration (present when is_agent == true with YAML config block).
     pub agent_config: Option<AgentConfig>,
+    /// Callable interface (declares this listener as an LLM-invocable tool).
+    pub callable: Option<CallableConfig>,
+    /// Buffer node config (ephemeral child pipeline).
+    pub buffer: Option<BufferConfig>,
 }
 
 /// Result of a hot-reload diff.
@@ -85,7 +170,7 @@ pub struct ReloadEvent {
 }
 
 /// The organism: single source of truth for configuration.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Organism {
     pub name: String,
     listeners: HashMap<String, ListenerDef>,
@@ -189,6 +274,14 @@ impl Organism {
         self.listeners.values().filter(|l| l.is_agent).collect()
     }
 
+    /// Get all listeners that are buffer nodes (have both callable + buffer config).
+    pub fn buffer_listeners(&self) -> Vec<&ListenerDef> {
+        self.listeners
+            .values()
+            .filter(|l| l.callable.is_some() && l.buffer.is_some())
+            .collect()
+    }
+
     // ── Hot reload ──
 
     /// Apply a new configuration, returning what changed.
@@ -275,6 +368,8 @@ mod tests {
             wasm: None,
             semantic_description: None,
             agent_config: None,
+            callable: None,
+            buffer: None,
         }
     }
 
@@ -403,6 +498,8 @@ mod tests {
             }),
             semantic_description: None,
             agent_config: None,
+            callable: None,
+            buffer: None,
         })
         .unwrap();
 
@@ -432,6 +529,8 @@ mod tests {
             }),
             semantic_description: None,
             agent_config: None,
+            callable: None,
+            buffer: None,
         })
         .unwrap();
 
