@@ -25,6 +25,10 @@ use super::app::{ActiveTab, AgentStatus, ThreadsFocus, TuiApp};
 use super::context_tree;
 use super::dashboard;
 
+/// Subtle dark background for fixed-width blocks (tables, code, diagrams).
+/// Works on 256-color and truecolor terminals; falls back gracefully on 16-color.
+const BLOCK_BG: Color = Color::Rgb(30, 30, 36);
+
 /// Draw the full TUI layout.
 pub fn draw(f: &mut Frame, app: &mut TuiApp) {
     // YAML tab: hide input bar, give all space to editor
@@ -650,6 +654,8 @@ fn draw_messages(f: &mut Frame, app: &mut TuiApp, area: Rect) {
     let wrap_width = area.width.saturating_sub(2).max(1) as usize;
 
     let mut lines: Vec<Line> = Vec::new();
+    // Track which lines are nowrap (tables/box-drawing) for anchored h-scroll
+    let mut nowrap: Vec<bool> = Vec::new();
     let mut last_entry_start: u32 = 0;
 
     for entry in &app.chat_log {
@@ -657,6 +663,7 @@ fn draw_messages(f: &mut Frame, app: &mut TuiApp, area: Rect) {
         match entry.role.as_str() {
             "user" => {
                 lines.push(Line::from(""));
+                nowrap.push(false);
                 let user_line = Line::from(vec![
                     Span::styled(
                         "[You] ",
@@ -666,32 +673,58 @@ fn draw_messages(f: &mut Frame, app: &mut TuiApp, area: Rect) {
                     ),
                     Span::raw(entry.text.clone()),
                 ]);
-                lines.extend(wrap_line(user_line, wrap_width));
+                let wrapped = wrap_line(user_line, wrap_width);
+                nowrap.extend(std::iter::repeat(false).take(wrapped.len()));
+                lines.extend(wrapped);
             }
             "agent" => {
                 lines.push(Line::from(""));
+                nowrap.push(false);
                 lines.push(Line::from(vec![Span::styled(
                     "[Agent]",
                     Style::default()
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
                 )]));
-                for line in super::markdown::render_markdown(&entry.text) {
-                    if is_nowrap_line(&line) {
+                nowrap.push(false);
+                for tagged in super::markdown::render_markdown(&entry.text) {
+                    if tagged.nowrap {
+                        // Gray background — pad with spaces to fill full pane width
+                        let mut line = tagged.line;
+                        let content_w: usize = line.spans.iter()
+                            .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                            .sum();
+                        let fill_width = wrap_width + app.message_h_scroll as usize;
+                        let pad = fill_width.saturating_sub(content_w);
+                        if pad > 0 {
+                            line.spans.push(Span::styled(
+                                " ".repeat(pad),
+                                Style::default().bg(BLOCK_BG),
+                            ));
+                        }
+                        for span in &mut line.spans {
+                            span.style = span.style.bg(BLOCK_BG);
+                        }
                         lines.push(line);
+                        nowrap.push(true);
                     } else {
-                        lines.extend(wrap_line(line, wrap_width));
+                        let wrapped = wrap_line(tagged.line, wrap_width);
+                        nowrap.extend(std::iter::repeat(false).take(wrapped.len()));
+                        lines.extend(wrapped);
                     }
                 }
             }
             "system" => {
                 lines.push(Line::from(""));
+                nowrap.push(false);
                 for text_line in entry.text.lines() {
                     let sys_line = Line::from(vec![Span::styled(
                         text_line.to_string(),
                         Style::default().fg(Color::DarkGray),
                     )]);
-                    lines.extend(wrap_line(sys_line, wrap_width));
+                    let wrapped = wrap_line(sys_line, wrap_width);
+                    nowrap.extend(std::iter::repeat(false).take(wrapped.len()));
+                    lines.extend(wrapped);
                 }
             }
             _ => {}
@@ -701,16 +734,20 @@ fn draw_messages(f: &mut Frame, app: &mut TuiApp, area: Rect) {
     // Show thinking indicator when waiting
     if app.agent_status == AgentStatus::Thinking {
         lines.push(Line::from(""));
+        nowrap.push(false);
         lines.push(Line::from(vec![Span::styled(
             "thinking...",
             Style::default().fg(Color::Yellow),
         )]));
+        nowrap.push(false);
     } else if let AgentStatus::ToolCall(ref name) = app.agent_status {
         lines.push(Line::from(""));
+        nowrap.push(false);
         lines.push(Line::from(vec![Span::styled(
             format!("using {name}..."),
             Style::default().fg(Color::Cyan),
         )]));
+        nowrap.push(false);
     }
 
     if lines.is_empty() {
@@ -718,6 +755,19 @@ fn draw_messages(f: &mut Frame, app: &mut TuiApp, area: Rect) {
             "No messages yet. Type a task and press Enter.",
             Style::default().fg(Color::DarkGray),
         )));
+        nowrap.push(false);
+    }
+
+    // Anchored horizontal scroll: pad wrapped lines so they stay in place,
+    // while nowrap lines (tables) shift left to reveal hidden content.
+    let h = app.message_h_scroll as usize;
+    if h > 0 {
+        let pad = " ".repeat(h);
+        for (i, line) in lines.iter_mut().enumerate() {
+            if !nowrap.get(i).copied().unwrap_or(false) {
+                line.spans.insert(0, Span::raw(pad.clone()));
+            }
+        }
     }
 
     // Clamp scroll so we never scroll past content.
@@ -1043,14 +1093,6 @@ fn draw_status(f: &mut Frame, app: &TuiApp, area: Rect) {
 }
 
 // ─── Selective word-wrapping helpers ────────────────────────────────────────
-
-/// Returns true if a line should NOT be word-wrapped (tables, box-drawing art).
-fn is_nowrap_line(line: &Line) -> bool {
-    const BOX_CHARS: &[char] = &['│', '┌', '┬', '┐', '├', '┼', '┤', '└', '┴', '┘', '─'];
-    line.spans
-        .iter()
-        .any(|s| s.content.chars().any(|c| BOX_CHARS.contains(&c)))
-}
 
 /// Word-wrap a single `Line` at `max_width` display columns, preserving span styles.
 /// Returns the line unchanged if it already fits.

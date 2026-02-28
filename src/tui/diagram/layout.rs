@@ -149,6 +149,14 @@ pub fn layout(graph: &Graph, max_width: usize) -> PositionedGraph {
     // Step 6: Container bounds
     let positioned_containers = compute_container_bounds(graph, &node_positions);
 
+    // Extend height to include any peer-edge U-shapes that route below the last layer.
+    let edge_max_y = positioned_edges
+        .iter()
+        .flat_map(|e| e.waypoints.iter().map(|&(_, y)| y))
+        .max()
+        .unwrap_or(0);
+    let total_height = total_height.max(edge_max_y + 1);
+
     PositionedGraph {
         nodes: positioned_nodes,
         edges: positioned_edges,
@@ -336,30 +344,42 @@ fn route_edges(
             let end_x = tx + tw / 2;
             let end_y = ty.saturating_sub(1); // one row above target top border
 
-            if end_y <= start_y {
-                // Nodes overlap vertically — just draw a direct connection
-                return Some(PositionedEdge {
-                    from: edge.from.clone(),
-                    to: edge.to.clone(),
-                    label: edge.label.clone(),
-                    direction: edge.direction.clone(),
-                    waypoints: vec![(start_x, start_y), (end_x, ty)],
-                });
-            }
-
-            let mid_y = (start_y + end_y) / 2;
-
-            let waypoints = if start_x == end_x {
-                // Straight vertical
-                vec![(start_x, start_y), (start_x, end_y)]
+            let waypoints = if end_y <= start_y {
+                // Same layer (or overlapping): route as a U-shape below the row.
+                // Go down one row, across, then back up to the target's bottom border.
+                let bypass_y = start_y.max(ty + fh) + 1;
+                if start_x == end_x {
+                    // Directly above/below — just a stub down to the bypass row
+                    vec![
+                        (start_x, start_y),
+                        (start_x, bypass_y),
+                        (end_x, bypass_y),
+                        (end_x, ty + fh - 1),
+                    ]
+                } else {
+                    // U-shape: down, across, up
+                    vec![
+                        (start_x, start_y),
+                        (start_x, bypass_y),
+                        (end_x, bypass_y),
+                        (end_x, ty + fh - 1),
+                    ]
+                }
             } else {
-                // Manhattan: down, across, down
-                vec![
-                    (start_x, start_y),
-                    (start_x, mid_y),
-                    (end_x, mid_y),
-                    (end_x, end_y),
-                ]
+                let mid_y = (start_y + end_y) / 2;
+
+                if start_x == end_x {
+                    // Straight vertical
+                    vec![(start_x, start_y), (start_x, end_y)]
+                } else {
+                    // Manhattan: down, across, down
+                    vec![
+                        (start_x, start_y),
+                        (start_x, mid_y),
+                        (end_x, mid_y),
+                        (end_x, end_y),
+                    ]
+                }
             };
 
             Some(PositionedEdge {

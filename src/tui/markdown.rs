@@ -10,28 +10,39 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-/// Parse markdown text and return styled lines suitable for a `Paragraph`.
+/// A rendered line with a flag indicating whether it should be exempt from word-wrapping
+/// (tables, diagrams, code blocks — anything that must preserve exact column layout).
+pub struct TaggedLine {
+    pub line: Line<'static>,
+    pub nowrap: bool,
+}
+
+/// Parse markdown text and return tagged styled lines suitable for a `Paragraph`.
 ///
-/// D2 fenced code blocks are rendered as box-drawing diagrams instead of
-/// plain code. Pipe-delimited markdown tables are rendered as box-drawing
-/// tables. All other markdown passes through `tui-markdown`.
-pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
+/// D2 fenced code blocks are rendered as box-drawing diagrams. Other fenced
+/// code blocks are rendered via `tui-markdown` but tagged as nowrap. Pipe-
+/// delimited tables are rendered as box-drawing tables (also nowrap).
+/// All other markdown passes through `tui-markdown` as wrappable prose.
+pub fn render_markdown(text: &str) -> Vec<TaggedLine> {
     let mut result = Vec::new();
     let mut remaining = text;
 
-    while let Some(d2_start) = remaining.find("```d2") {
-        // Render markdown before the D2 block
-        let before = &remaining[..d2_start];
+    // Process all fenced code blocks (``` with any language tag, including ```d2)
+    while let Some(fence_start) = remaining.find("```") {
+        // Render markdown before this fence
+        let before = &remaining[..fence_start];
         if !before.trim().is_empty() {
             result.extend(render_with_tables(before));
         }
 
-        // Find the code content start (after the ```d2 line)
-        let after_marker = &remaining[d2_start + 5..];
-        let code_start = match after_marker.find('\n') {
-            Some(i) => d2_start + 5 + i + 1,
-            None => break, // no newline after marker, treat as-is
+        // Parse the language tag (everything after ``` until newline)
+        let after_fence = &remaining[fence_start + 3..];
+        let newline_pos = match after_fence.find('\n') {
+            Some(i) => i,
+            None => break, // no newline after opening fence
         };
+        let lang = after_fence[..newline_pos].trim();
+        let code_start = fence_start + 3 + newline_pos + 1;
 
         // Find the closing ```
         let code_end = match remaining[code_start..].find("```") {
@@ -39,8 +50,20 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
             None => break, // unclosed block, fall through to render as-is
         };
 
-        let d2_source = &remaining[code_start..code_end];
-        result.extend(super::diagram::render_d2(d2_source, 80));
+        let code_source = &remaining[code_start..code_end];
+
+        if lang == "d2" {
+            // D2 diagrams: render as box-drawing art
+            for line in super::diagram::render_d2(code_source, 80) {
+                result.push(TaggedLine { line, nowrap: true });
+            }
+        } else {
+            // Other code blocks: render via tui-markdown, tag as nowrap
+            let fenced = format!("```{lang}\n{code_source}```");
+            for line in render_markdown_raw(&fenced) {
+                result.push(TaggedLine { line, nowrap: true });
+            }
+        }
 
         // Skip past the closing ``` and optional trailing newline
         let after_close = code_end + 3;
@@ -51,7 +74,7 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
         };
     }
 
-    // Render any remaining markdown
+    // Render any remaining markdown (prose + tables)
     if !remaining.trim().is_empty() {
         result.extend(render_with_tables(remaining));
     }
@@ -60,7 +83,7 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
 
 /// Split text into table and non-table chunks, rendering each appropriately.
 /// A table block is a run of consecutive lines that start with `|`.
-fn render_with_tables(text: &str) -> Vec<Line<'static>> {
+fn render_with_tables(text: &str) -> Vec<TaggedLine> {
     let mut result = Vec::new();
     let mut non_table = String::new();
 
@@ -71,7 +94,9 @@ fn render_with_tables(text: &str) -> Vec<Line<'static>> {
         if is_table_line(lines[i]) {
             // Flush any accumulated non-table text
             if !non_table.trim().is_empty() {
-                result.extend(render_markdown_raw(&non_table));
+                for line in render_markdown_raw(&non_table) {
+                    result.push(TaggedLine { line, nowrap: false });
+                }
             }
             non_table.clear();
 
@@ -81,7 +106,10 @@ fn render_with_tables(text: &str) -> Vec<Line<'static>> {
                 table_lines.push(lines[i]);
                 i += 1;
             }
-            result.extend(render_table_block(&table_lines));
+            // All table lines are nowrap
+            for line in render_table_block(&table_lines) {
+                result.push(TaggedLine { line, nowrap: true });
+            }
         } else {
             non_table.push_str(lines[i]);
             non_table.push('\n');
@@ -91,7 +119,9 @@ fn render_with_tables(text: &str) -> Vec<Line<'static>> {
 
     // Flush remaining non-table text
     if !non_table.trim().is_empty() {
-        result.extend(render_markdown_raw(&non_table));
+        for line in render_markdown_raw(&non_table) {
+            result.push(TaggedLine { line, nowrap: false });
+        }
     }
 
     result
@@ -241,20 +271,24 @@ fn render_markdown_raw(text: &str) -> Vec<Line<'static>> {
 mod tests {
     use super::*;
 
-    fn lines_to_text(lines: &[Line]) -> String {
-        lines
+    /// Extract just the Line refs from TaggedLines for text assertions.
+    fn lines_to_text(tagged: &[TaggedLine]) -> String {
+        tagged
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|t| t.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn flat_text(tagged: &[TaggedLine]) -> String {
+        tagged.iter().flat_map(|t| t.line.spans.iter()).map(|s| s.content.as_ref()).collect()
     }
 
     #[test]
     fn render_plain_text() {
         let lines = render_markdown("Hello world");
         assert!(!lines.is_empty());
-        let text: String = lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("Hello world"));
+        assert!(flat_text(&lines).contains("Hello world"));
     }
 
     #[test]
@@ -266,10 +300,11 @@ mod tests {
         assert!(text.contains("Col B"));
         assert!(text.contains("1"));
         assert!(text.contains("2"));
-        // Should have box-drawing characters
         assert!(text.contains('┌'));
         assert!(text.contains('│'));
         assert!(text.contains('└'));
+        // Table lines should be tagged nowrap
+        assert!(lines.iter().any(|t| t.nowrap));
     }
 
     #[test]
@@ -277,11 +312,9 @@ mod tests {
         let md = "| Dimension | Score |\n|---|---|\n| Architecture | 5 |\n| Security | 4 |";
         let lines = render_markdown(md);
         let text = lines_to_text(&lines);
-        // Header separator
         assert!(text.contains('├'));
         assert!(text.contains('┼'));
         assert!(text.contains('┤'));
-        // Content
         assert!(text.contains("Architecture"));
         assert!(text.contains("Security"));
     }
@@ -291,15 +324,14 @@ mod tests {
         let md = "```rust\nfn main() {}\n```";
         let lines = render_markdown(md);
         assert!(!lines.is_empty());
-        let text: String = lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("fn main"));
+        assert!(flat_text(&lines).contains("fn main"));
     }
 
     #[test]
     fn render_heading() {
         let md = "# Big Title\nSome text";
         let lines = render_markdown(md);
-        let text: String = lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref()).collect();
+        let text = flat_text(&lines);
         assert!(text.contains("Big Title"));
         assert!(text.contains("Some text"));
     }
@@ -313,14 +345,12 @@ mod tests {
         assert!(text.contains("prose"));
         assert!(text.contains("x"));
         assert!(text.contains("code"));
-        // Table should have box drawing
         assert!(text.contains('┌'));
     }
 
     #[test]
     fn render_empty() {
         let lines = render_markdown("");
-        // Should not panic — empty or single blank line is fine
         assert!(lines.len() <= 1);
     }
 
@@ -329,11 +359,11 @@ mod tests {
         let md = "Here is a diagram:\n\n```d2\na -> b\nb -> c\n```\n\nEnd.";
         let lines = render_markdown(md);
         let text = lines_to_text(&lines);
-        // Should contain rendered box art, not raw D2 source
         assert!(text.contains('a'));
         assert!(text.contains('b'));
-        // Should contain box-drawing characters from the renderer
         assert!(text.contains('┌') || text.contains('▼'));
+        // D2 lines should be tagged nowrap
+        assert!(lines.iter().any(|t| t.nowrap));
     }
 
     #[test]
@@ -349,7 +379,6 @@ mod tests {
     fn render_unclosed_d2_block() {
         let md = "```d2\na -> b\nno closing fence";
         let lines = render_markdown(md);
-        // Should not panic — falls back to rendering as-is
         assert!(!lines.is_empty());
     }
 
@@ -364,14 +393,12 @@ mod tests {
 
     #[test]
     fn emoji_columns_align() {
-        // Emojis are double-width — verify all rows produce same display width
         let md = "| Dimension | Assessment |\n|---|---|\n| Architecture | ⭐⭐⭐⭐⭐ Clean |\n| Security | ⭐⭐⭐ OK |";
         let lines = render_markdown(md);
-        // All lines (borders + data) should have the same display width
         let widths: Vec<usize> = lines
             .iter()
-            .map(|l| {
-                l.spans.iter().map(|s| s.content.width()).sum::<usize>()
+            .map(|t| {
+                t.line.spans.iter().map(|s| s.content.width()).sum::<usize>()
             })
             .collect();
         let first = widths[0];
@@ -392,7 +419,6 @@ mod tests {
 
     #[test]
     fn shorten_model_id_helper() {
-        // Verify the is_table_line helper
         assert!(is_table_line("| a | b |"));
         assert!(is_table_line("|---|---|"));
         assert!(!is_table_line("not a table"));
@@ -407,12 +433,11 @@ mod tests {
 
     #[test]
     fn short_header_long_body_aligns() {
-        // Body rows much wider than header — border must match the widest content
         let md = "| A | B |\n|---|---|\n| Architecture | ⭐⭐⭐⭐⭐ Clean modular design |\n| Security | ⭐⭐⭐⭐ Strong |";
         let lines = render_markdown(md);
         let widths: Vec<usize> = lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.width()).sum::<usize>())
+            .map(|t| t.line.spans.iter().map(|s| s.content.width()).sum::<usize>())
             .collect();
         let first = widths[0];
         for (i, w) in widths.iter().enumerate() {
@@ -422,16 +447,36 @@ mod tests {
 
     #[test]
     fn uneven_column_count_aligns() {
-        // Body row has more columns than header
         let md = "| A | B |\n|---|---|\n| x | y | extra |";
         let lines = render_markdown(md);
         let widths: Vec<usize> = lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.width()).sum::<usize>())
+            .map(|t| t.line.spans.iter().map(|s| s.content.width()).sum::<usize>())
             .collect();
         let first = widths[0];
         for (i, w) in widths.iter().enumerate() {
             assert_eq!(*w, first, "line {i} has width {w}, expected {first}");
         }
+    }
+
+    #[test]
+    fn d2_lines_all_nowrap() {
+        let md = "```d2\na -> b\nb -> c\n```";
+        let lines = render_markdown(md);
+        assert!(lines.iter().all(|t| t.nowrap), "all D2 lines should be nowrap");
+    }
+
+    #[test]
+    fn table_lines_all_nowrap() {
+        let md = "| A | B |\n|---|---|\n| x | y |";
+        let lines = render_markdown(md);
+        assert!(lines.iter().all(|t| t.nowrap), "all table lines should be nowrap");
+    }
+
+    #[test]
+    fn prose_lines_not_nowrap() {
+        let md = "Hello world\n\nSome paragraph text.";
+        let lines = render_markdown(md);
+        assert!(lines.iter().all(|t| !t.nowrap), "prose lines should not be nowrap");
     }
 }
