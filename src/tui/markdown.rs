@@ -404,4 +404,34 @@ mod tests {
         let b = build_border(&[5, 3], '┌', '┬', '┐');
         assert_eq!(b, "┌───────┬─────┐");
     }
+
+    #[test]
+    fn short_header_long_body_aligns() {
+        // Body rows much wider than header — border must match the widest content
+        let md = "| A | B |\n|---|---|\n| Architecture | ⭐⭐⭐⭐⭐ Clean modular design |\n| Security | ⭐⭐⭐⭐ Strong |";
+        let lines = render_markdown(md);
+        let widths: Vec<usize> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.width()).sum::<usize>())
+            .collect();
+        let first = widths[0];
+        for (i, w) in widths.iter().enumerate() {
+            assert_eq!(*w, first, "line {i} has width {w}, expected {first}");
+        }
+    }
+
+    #[test]
+    fn uneven_column_count_aligns() {
+        // Body row has more columns than header
+        let md = "| A | B |\n|---|---|\n| x | y | extra |";
+        let lines = render_markdown(md);
+        let widths: Vec<usize> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.width()).sum::<usize>())
+            .collect();
+        let first = widths[0];
+        for (i, w) in widths.iter().enumerate() {
+            assert_eq!(*w, first, "line {i} has width {w}, expected {first}");
+        }
+    }
 }
